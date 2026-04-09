@@ -984,7 +984,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 <div class="w">
   <div class="hdr">
     <div class="logo">R<em>V</em>N</div>
-    <span class="vtag">v4.1 — RCS</span>
+    <span class="vtag">v4.1— BETA — RCS</span>
     <!-- FIX: live connection indicator -->
     <span id="conn-dot" class="conn-dot" title="Controller connection"></span>
   </div>
@@ -1751,4 +1751,4 @@ if __name__ == "__main__":
     print(f"  │  Local  : http://localhost:8000                    │")
     print(f"  │  Network: http://{ip}:8000        │")
     print(f"  └────────────────────────────────────────────────────┘\n")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
