@@ -1,0 +1,284 @@
+{
+    "f2": {
+        "pull_down": 95.0,
+        "horizontal": -4.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "r4c": {
+        "name": "r4c",
+        "tags": {
+            "2": "ACOG"
+        },
+        "pull_down": 80.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": -5.0,
+        "horizontal_delay_ms": 1,
+        "horizontal_duration_ms": 3398
+    },
+    "p90": {
+        "name": "p90",
+        "tags": {
+            "1": "HOLO"
+        },
+        "pull_down": 28.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "vector": {
+        "name": "vector",
+        "tags": {
+            "1": "HOLO"
+        },
+        "pull_down": 35.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "smg11": {
+        "name": "smg11",
+        "tags": {
+            "1": "HOLO"
+        },
+        "pull_down": 45.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "t5-smg": {
+        "pull_down": 38.0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "mp7": {
+        "pull_down": 43.0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "9x19VSN": {
+        "pull_down": 38.0,
+        "horizontal": -3.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "ak12": {
+        "pull_down": 85.0,
+        "horizontal": -5.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "t95LSW": {
+        "pull_down": 73.0,
+        "horizontal": 2.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "ump45": {
+        "pull_down": 22.0,
+        "horizontal": -3.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "mp5": {
+        "pull_down": 35.0,
+        "horizontal": -2.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "V308": {
+        "name": "V308",
+        "tags": {
+            "2": "ACOG"
+        },
+        "pull_down": 50.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "C8-SFW": {
+        "pull_down": 100.0,
+        "horizontal": -4.0,
+        "horizontal_delay_ms": 44,
+        "horizontal_duration_ms": 0
+    },
+    "type89": {
+        "pull_down": 82.0,
+        "horizontal": -10.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "L85A2": {
+        "pull_down": 65.0,
+        "horizontal": 10.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "MPX": {
+        "pull_down": 34.0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "AUG-A2": {
+        "pull_down": 50.0,
+        "horizontal": 6.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "Mx4-Storm": {
+        "pull_down": 44.0,
+        "horizontal": 5.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "smg12-requires-left-and-right-control": {
+        "name": "smg12-requires-left-and-right-control",
+        "tags": {
+            "1": "HOLO"
+        },
+        "pull_down": 50.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 5.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "augA3": {
+        "pull_down": 30.0,
+        "horizontal": 3.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "p10-roni": {
+        "pull_down": 40.0,
+        "horizontal": 6.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "pdw9": {
+        "name": "pdw9",
+        "tags": {
+            "2": "ACOG"
+        },
+        "pull_down": 58.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": -2.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "ak74M": {
+        "pull_down": 67.0,
+        "horizontal": -5.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "556XI": {
+        "pull_down": 61.0,
+        "horizontal": 8.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "G36C": {
+        "pull_down": 80.0,
+        "horizontal": 6.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "mk17-cqb": {
+        "name": "mk17-cqb",
+        "tags": {
+            "2": "ACOG"
+        },
+        "pull_down": 31.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 7.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "para308": {
+        "pull_down": 67.0,
+        "horizontal": -3.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "552commando": {
+        "pull_down": 71.0,
+        "horizontal": -4.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "sc3000k": {
+        "pull_down": 96.0,
+        "horizontal": -7.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "m4": {
+        "pull_down": 84.0,
+        "horizontal": -3.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "uzk50gi": {
+        "name": "uzk50gi",
+        "tags": {
+            "1": "HOLO"
+        },
+        "pull_down": 25.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "mp5sd": {
+        "pull_down": 37.0,
+        "horizontal": -2.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "dp27": {
+        "name": "dp27",
+        "tags": {
+            "1": "HOLO"
+        },
+        "pull_down": 13.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 2.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "9mmC1": {
+        "pull_down": 22.0,
+        "horizontal": 0.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    },
+    "Spear .308": {
+        "name": "Spear .308",
+        "tags": {
+            "1": "HOLO"
+        },
+        "pull_down": 30.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": -2.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0
+    }
+}
