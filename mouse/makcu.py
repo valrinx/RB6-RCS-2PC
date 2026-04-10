@@ -59,10 +59,8 @@ class makcu_controller:
                                     makcu_controller.button_states[name] = pressed
                                     break
 
-                    makcu_controller.controller.set_button_callback(
-                        on_button_event)
+                    makcu_controller.controller.set_button_callback(on_button_event)
                     makcu_controller.controller.enable_button_monitoring(True)
-
                     makcu_controller.is_connected_flag = True
 
                 except Exception as e:
@@ -81,7 +79,6 @@ class makcu_controller:
     def click_button(button_name: str):
         if not makcu_controller.is_connected():
             return False
-
         mck = makcu_controller.controller
         try:
             if button_name in BUTTONS:
@@ -94,10 +91,14 @@ class makcu_controller:
             return False
 
     @staticmethod
+    def click_lmb():
+        """Click LMB once — used by rapid fire."""
+        makcu_controller.click_button("LMB")
+
+    @staticmethod
     def simple_move_mouse(x, y):
         if not makcu_controller.is_connected():
             return False
-
         try:
             makcu_controller.controller.move(x, y)
             return True
@@ -110,7 +111,6 @@ class makcu_controller:
     def move_mouse_smoothly(dx, dy, steps=20, duration=0.05):
         if not makcu_controller.is_connected():
             return False
-
         if dx == 0 and dy == 0:
             return False
 
@@ -123,30 +123,21 @@ class makcu_controller:
         try:
             accumulated_x = 0.0
             accumulated_y = 0.0
-
             for i in range(steps):
                 t = (i + 1) / steps
                 eased = ease_out_quad(t)
-
                 target_x = dx * eased
                 target_y = dy * eased
-
                 delta_x = target_x - accumulated_x
                 delta_y = target_y - accumulated_y
-
                 move_x = round(delta_x)
                 move_y = round(delta_y)
-
                 accumulated_x += move_x
                 accumulated_y += move_y
-
                 if move_x or move_y:
                     mck.move(move_x, move_y)
-
                 time.sleep(step_delay)
-
             return True
-
         except Exception as e:
             print(f"[MAKCU] Smooth move error: {e}")
             makcu_controller.is_connected_flag = False
@@ -165,6 +156,5 @@ class makcu_controller:
                     makcu_controller.controller.disconnect()
                 except Exception:
                     pass
-
             makcu_controller.controller = None
             makcu_controller.is_connected_flag = False
