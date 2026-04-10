@@ -49,10 +49,10 @@ New-NetFirewallRule -DisplayName "RVN Port 8000" -Direction Inbound -Action Allo
 
 ## Usage
 
-Double-click `rvn.bat`, or run in terminal:
+Double-click `rvn.py`, or run in terminal:
 
 ```bash
-python rvn_v4.py
+python rvn.py
 ```
 
 The console will print the URLs to open:
