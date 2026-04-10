@@ -1,12 +1,11 @@
 """
-RVN — Recoil Control System  v5.2
-Bug fixes from v5.1:
-  • FIX: โหลด config ปืนแล้ว hip fire ค่าไม่ sync ไป backend — เพิ่ม fetch /hip-fire ใน cfgdd.onchange
-  • FIX: last_rf_click ไม่ reset เมื่อปล่อย LMB — rapid fire click แรกหลังกด LMB ช้าผิดปกติ
-  • FIX: rf_just_clicked reset hold_start ทุก tick ทำให้ recoil loop ไม่ทำงาน — แยก rapid fire กับ RCS ให้ชัดเจน
-  • FIX: hip fire ใช้ค่า 0 แม้กรอกค่าไว้ เพราะ sendHF() ถูก call ก่อน field update
-  • FIX: makcu click_lmb() ขาดใน makcu.py — เพิ่ม wrapper
-  • FIX: โหลด config ปืนแล้ว pull_down/horizontal ส่งผ่าน WS แต่ hip fire ไม่ส่ง — แก้ให้ส่งพร้อมกัน
+RVN — Recoil Control System  v5.1
+Bug fixes from v5.0:
+  • FIX: Rapid Fire interval ไม่ล็อคที่ 100 — ส่งค่า interval_ms ทุกครั้งที่กด pill + เปลี่ยน 'change' → 'input'
+  • FIX: Hip Fire ส่งค่า pull_down/horizontal เสมอ แม้ pill ยังปิดอยู่
+  • FIX: Hip Fire + Trigger mode LMB+RMB conflict — hip fire ทำงานได้แม้ mode เป็น LMB+RMB
+  • FIX: Rapid Fire ไม่ reset hold_start — แก้ให้ RCS loop ไม่นับ hold time ต่อเนื่องจาก auto-click
+  • FIX: WebSocket ขาด horizontal_curve handler — เพิ่ม set_curves สำหรับ horizontal_curve ด้วย
 """
 
 import threading
@@ -312,6 +311,7 @@ class GunConfig(BaseModel):
     horizontal_duration_ms:   int   = Field(default=2000, ge=0,    le=10000)
     pull_down_curve:  Optional[List[float]] = None
     horizontal_curve: Optional[List[float]] = None
+    # Hip fire overrides
     hip_pull_down:    Optional[float] = Field(default=None, ge=0, le=300)
     hip_horizontal:   Optional[float] = Field(default=None, ge=-300, le=300)
 
@@ -363,8 +363,10 @@ class AppState:
         self.kmbox_ip                = "192.168.2.188"
         self.kmbox_port              = 1408
         self.kmbox_uuid              = ""
+        # ── Rapid Fire ───────────────────────────────────────────────────────
         self.rapid_fire_enabled      = False
         self.rapid_fire_interval_ms  = 100
+        # ── Hip Fire ─────────────────────────────────────────────────────────
         self.hip_fire_enabled        = False
         self.hip_pull_down           = 0.0
         self.hip_horizontal          = 0.0
@@ -441,6 +443,7 @@ class AppState:
     def get_kmbox_config(self):
         with self.lock: return {"ip": self.kmbox_ip, "port": self.kmbox_port, "uuid": self.kmbox_uuid}
 
+    # ── Rapid Fire ────────────────────────────────────────────────────────────
     def set_rapid_fire(self, enabled, interval_ms):
         with self.lock:
             self.rapid_fire_enabled     = enabled
@@ -448,6 +451,7 @@ class AppState:
     def get_rapid_fire(self):
         with self.lock: return self.rapid_fire_enabled, self.rapid_fire_interval_ms
 
+    # ── Hip Fire ──────────────────────────────────────────────────────────────
     def set_hip_fire(self, enabled, pull_down, horizontal):
         with self.lock:
             self.hip_fire_enabled = enabled
@@ -515,7 +519,7 @@ def humanize(rx, ry, jitter, smoother, smooth):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Main control loop  — v5.2 fixed
+#  Main control loop
 # ══════════════════════════════════════════════════════════════════════════════
 TICK_S = 0.010
 
@@ -527,16 +531,14 @@ async def lifespan(app):
 
 
 def mouse_control_loop():
-    toggle_was  = False
-    hold_start  = None
-    curve_tick  = 0
-    smoother    = _Smoother()
+    toggle_was = False
+    hold_start = None
+    curve_tick = 0
+    smoother   = _Smoother()
     _listener_started = {"makcu": False, "kmbox": False, "software": False}
 
-    # ── Rapid fire timer ──────────────────────────────────────────────────────
-    # FIX: reset ไป 0 เพื่อให้ click แรกเกิดทันทีเมื่อกด LMB
-    last_rf_click  = 0.0
-    lmb_was        = False   # FIX: track LMB edge เพื่อ reset timer เมื่อปล่อยแล้วกดใหม่
+    # Rapid fire state
+    last_rf_click = 0.0
 
     while True:
         t0 = time.perf_counter()
@@ -568,39 +570,32 @@ def mouse_control_loop():
             lmb = ctrl.get_button_state("LMB")
             rmb = ctrl.get_button_state("RMB")
 
-            rcs_enabled = app_state.get_enabled()
-
-            # ── FIX: reset rapid fire timer เมื่อ LMB ถูกปล่อยแล้วกดใหม่ ────
-            if not lmb and lmb_was:
-                last_rf_click = 0.0   # reset → click แรกเกิดทันทีรอบหน้า
-            lmb_was = lmb
-
-            # ── Rapid Fire ────────────────────────────────────────────────────
-            # FIX: rapid fire แยกออกจาก recoil loop อย่างชัดเจน
-            # ไม่ reset hold_start อีกต่อไป — RCS ทำงานต่อเนื่องระหว่าง rapid fire
-            rf_en, rf_ms = app_state.get_rapid_fire()
-            if rcs_enabled and rf_en and lmb:
-                now = time.perf_counter()
-                if (now - last_rf_click) * 1000.0 >= rf_ms:
-                    ctrl.click_lmb()
-                    last_rf_click = now
-
             # ── Hip Fire detection ────────────────────────────────────────────
             hf_en, hf_pd, hf_hz = app_state.get_hip_fire()
-            # hip = เปิด hip fire mode และไม่ได้กด RMB (ไม่ ADS)
             is_hip = hf_en and not rmb
 
             # ── Fire condition ────────────────────────────────────────────────
-            # FIX: hip fire ใช้ LMB เสมอโดยไม่ขึ้นกับ trigger_mode
-            # เพราะ hip state หมายถึงไม่กด RMB อยู่แล้ว
             trigger_mode = app_state.get_trigger_mode()
             if is_hip:
                 fire = lmb
             else:
                 fire = (lmb and rmb) if trigger_mode == "LMB+RMB" else lmb
 
-            # ── Recoil Control ────────────────────────────────────────────────
-            if rcs_enabled and fire:
+            # ── Rapid Fire ────────────────────────────────────────────────────
+            # ROOT CAUSE FIX: ไม่ reset hold_start เมื่อ rapid fire click
+            # เพราะ click_lmb() ส่ง LMB down+up ทำให้ lmb state = False ชั่วคราว
+            # → fire = False → else branch reset hold_start = None
+            # → RCS ทำงานแค่นัดแรกแล้วหยุด
+            # แก้: RF และ RCS ทำงานแยกกัน RF ใช้ fire state จาก physical button
+            # ไม่ยุ่งกับ hold_start เลย
+            rf_en, rf_ms = app_state.get_rapid_fire()
+            if rf_en and app_state.get_enabled() and fire:
+                now = time.perf_counter()
+                if (now - last_rf_click) * 1000 >= rf_ms:
+                    ctrl.click_lmb()
+                    last_rf_click = now
+
+            if app_state.get_enabled() and fire:
                 now = time.perf_counter()
                 if hold_start is None:
                     hold_start = now
@@ -609,43 +604,34 @@ def mouse_control_loop():
 
                 pd_curve, hz_curve = app_state.get_curves()
 
+                # Choose values: hip or normal
                 if is_hip:
-                    # Hip fire mode: ใช้ค่า hip แทน config ปกติ
                     raw_y = hf_pd / 5.0
                     raw_x = hf_hz / 5.0
                 else:
-                    # ADS / normal mode: ใช้ config ปืน
+                    # Vertical
                     v_delay  = app_state.get_vertical_delay()
                     v_dur    = app_state.get_vertical_duration()
                     v_active = (hold_ms >= v_delay) and (v_dur == 0 or hold_ms <= v_delay + v_dur)
-
-                    if v_active:
-                        if pd_curve:
-                            raw_y = pd_curve[min(curve_tick, len(pd_curve) - 1)] / 5.0
-                        else:
-                            raw_y = app_state.get_active_value() / 5.0
-                    else:
-                        raw_y = 0.0
-
+                    raw_y = (
+                        (pd_curve[min(curve_tick, len(pd_curve)-1)] / 5.0 if pd_curve else app_state.get_active_value() / 5.0)
+                        if v_active else 0.0
+                    )
+                    # Horizontal
                     h_delay = app_state.get_horizontal_delay()
                     h_dur   = app_state.get_horizontal_duration()
                     raw_x   = 0.0
                     if hold_ms >= h_delay and (h_dur == 0 or hold_ms <= h_delay + h_dur):
-                        if hz_curve:
-                            raw_x = hz_curve[min(curve_tick, len(hz_curve) - 1)] / 5.0
-                        else:
-                            raw_x = app_state.get_horizontal_value() / 5.0
+                        raw_x = hz_curve[min(curve_tick, len(hz_curve)-1)] / 5.0 if hz_curve else app_state.get_horizontal_value() / 5.0
 
                 curve_tick += 1
                 mx, my = humanize(raw_x, raw_y, app_state.get_jitter(), smoother, app_state.get_smooth())
                 if mx or my:
                     ctrl.simple_move_mouse(mx, my)
             else:
-                # FIX: reset เฉพาะเมื่อไม่ fire จริงๆ (ไม่ reset เพราะ rapid fire)
-                if not fire:
-                    hold_start = None
-                    curve_tick = 0
-                    smoother.reset()
+                hold_start = None
+                curve_tick = 0
+                smoother.reset()
 
         except Exception as e:
             print(f"[LOOP] {e}")
@@ -687,21 +673,20 @@ async def ws_endpoint(websocket: WebSocket):
                         try: getattr(app_state, fn)(conv(msg[k]))
                         except: pass
 
-                # อัพเดท curves — อ่านค่าเก่าก่อนเพื่อรักษาค่าที่ยังไม่เปลี่ยน
+                # BUG FIX: เพิ่ม horizontal_curve handler ใน WebSocket
+                # v5.0 ขาด handler นี้ทำให้ horizontal_curve ไม่ถูก set ผ่าน WS
                 pd_curve, hz_curve = app_state.get_curves()
-                changed = False
 
                 if "pull_down_curve" in msg:
                     v = msg["pull_down_curve"]
                     pd_curve = v if isinstance(v, list) and len(v) > 0 else None
-                    changed = True
 
                 if "horizontal_curve" in msg:
                     v = msg["horizontal_curve"]
                     hz_curve = v if isinstance(v, list) and len(v) > 0 else None
-                    changed = True
 
-                if changed:
+                # อัพเดททั้งคู่พร้อมกันถ้ามีการเปลี่ยนแปลง
+                if "pull_down_curve" in msg or "horizontal_curve" in msg:
                     app_state.set_curves(pd_curve, hz_curve)
 
             except json.JSONDecodeError:
@@ -832,13 +817,13 @@ async def set_hip_fire(cfg: HipFireConfig):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  UI  v5.2
+#  UI  v5.1
 # ══════════════════════════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<title>RVN v5.2</title>
+<title>RVN v5.1</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
@@ -934,6 +919,10 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .toggle-pill.on{background:#031210;border-color:#1a5535;color:var(--ac);}
 .toggle-pill.on.rf{background:#120805;border-color:#451808;color:var(--or);}
 .toggle-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.6;}
+.sp-preview{font-family:var(--mo);font-size:.64rem;color:var(--mu);min-height:1.3em;margin-bottom:8px;word-break:break-all;padding:6px 9px;background:var(--bg);border-radius:5px;border:1px solid var(--bd);}
+.sp-preview.ready{color:var(--ac);border-color:#0c2e20;}
+.sp-actions{display:flex;gap:8px;margin-top:10px;}
+.sp-actions .btn{flex:1;}
 .warn{background:#120802;border:1px solid #481a08;border-radius:7px;color:#cc7744;font-size:.73rem;padding:8px 12px;margin-bottom:10px;display:none;align-items:center;gap:8px;font-family:var(--mo);}
 .warn.show{display:flex;}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
@@ -950,17 +939,16 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .sw-notice .w-line{color:#5a3a10;display:block;margin-top:4px;}
 .hf-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;}
 .hf-lbl{font-size:.6rem;color:var(--mu);margin-bottom:3px;font-family:var(--mo);text-transform:uppercase;letter-spacing:.5px;}
-.sp-preview{font-family:var(--mo);font-size:.64rem;color:var(--mu);min-height:1.3em;margin-bottom:8px;word-break:break-all;padding:6px 9px;background:var(--bg);border-radius:5px;border:1px solid var(--bd);}
-.sp-preview.ready{color:var(--ac);border-color:#0c2e20;}
-.sp-actions{display:flex;gap:8px;margin-top:10px;}
-.sp-actions .btn{flex:1;}
+/* v5.1 fix indicator */
+.num-row{display:flex;align-items:baseline;gap:4px;margin-bottom:6px;}
+.unit{font-family:var(--mo);font-size:.62rem;color:var(--mu);}
 </style>
 </head>
 <body>
 <div class="w">
   <div class="hdr">
     <div class="logo">R<em>V</em>N</div>
-    <span class="vtag">v5.2 — RCS</span>
+    <span class="vtag">v5.1 — RCS</span>
     <span id="conn-dot" class="conn-dot" title="Controller connection"></span>
   </div>
 
@@ -977,10 +965,9 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
     </div>
   </div>
 
-  <!-- ── Feature Pills ──────────────────────────────────────────────────────── -->
+  <!-- ── Feature Pills Row ─────────────────────────────────────────────────── -->
   <div style="display:flex;gap:8px;margin-bottom:8px;">
-
-    <!-- Rapid Fire -->
+    <!-- Rapid Fire pill -->
     <div class="feat-card" style="flex:1;margin-bottom:0;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
         <span class="feat-title" style="color:var(--or);">Rapid Fire</span>
@@ -990,14 +977,15 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="hf-lbl">Interval</div>
       <div style="display:flex;align-items:baseline;gap:4px;">
+        <!-- BUG FIX: เพิ่ม oninput ผ่าน JS แทน hardcode -->
         <input type="number" class="num num-sm" id="rf-ms" value="100" min="30" max="2000" style="width:80px;">
-        <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
+        <span class="unit">ms</span>
       </div>
       <input type="range" id="rf-sl" min="30" max="500" value="100" style="margin-top:5px;">
       <div class="hint" style="margin-top:4px;">30ms = ~33cps</div>
     </div>
 
-    <!-- Hip Fire -->
+    <!-- Hip Fire pill -->
     <div class="feat-card" style="flex:1;margin-bottom:0;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
         <span class="feat-title" style="color:var(--vi);">Hip Fire</span>
@@ -1035,18 +1023,12 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div class="tgrid">
         <div>
           <div class="tgrid-lbl">Delay</div>
-          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
-            <input type="number" class="num num-sm" id="vdv" value="0" min="0" max="5000">
-            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
-          </div>
+          <div class="num-row"><input type="number" class="num num-sm" id="vdv" value="0" min="0" max="5000"><span class="unit">ms</span></div>
           <input type="range" min="0" max="5000" step="1" value="0" id="vds">
         </div>
         <div>
           <div class="tgrid-lbl">Duration</div>
-          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
-            <input type="number" class="num num-sm" id="vduv" value="0" min="0" max="10000">
-            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
-          </div>
+          <div class="num-row"><input type="number" class="num num-sm" id="vduv" value="0" min="0" max="10000"><span class="unit">ms</span></div>
           <input type="range" min="0" max="10000" step="1" value="0" id="vdus">
         </div>
       </div>
@@ -1062,18 +1044,12 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div class="tgrid">
         <div>
           <div class="tgrid-lbl">Delay</div>
-          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
-            <input type="number" class="num num-sm" id="dv" value="500" min="0" max="5000">
-            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
-          </div>
+          <div class="num-row"><input type="number" class="num num-sm" id="dv" value="500" min="0" max="5000"><span class="unit">ms</span></div>
           <input type="range" min="0" max="5000" step="1" value="500" id="ds">
         </div>
         <div>
           <div class="tgrid-lbl">Duration</div>
-          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
-            <input type="number" class="num num-sm" id="uv" value="2000" min="0" max="10000">
-            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
-          </div>
+          <div class="num-row"><input type="number" class="num num-sm" id="uv" value="2000" min="0" max="10000"><span class="unit">ms</span></div>
           <input type="range" min="0" max="10000" step="1" value="2000" id="us">
         </div>
       </div>
@@ -1082,7 +1058,8 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 
     <div class="card">
       <div class="clabel">Recoil Curve <span style="font-size:.85em;color:var(--mu);letter-spacing:0;font-family:var(--sa);">— override ค่าคงที่</span></div>
-      <div class="hint" style="margin-bottom:9px">ลากเพื่อวาด · แกน X = เวลา · แกน Y = แรงดีด</div>
+      <div class="hint" style="margin-bottom:9px">ลากเพื่อวาด · แกน X = เวลา · แกน Y = แรงดีด<br>
+        <span style="color:#223a28;">— — —</span> เส้นประ = ค่าคงที่ &nbsp;<span style="color:#3ab070;">——</span> เส้น = curve</div>
       <div class="ceditor">
         <canvas id="curve-canvas" height="120"></canvas>
         <div class="cacts">
@@ -1195,6 +1172,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
 
       <div class="sdiv">Tags — Quick Presets</div>
+
       <div class="preset-section">
         <div class="preset-lbl" style="color:#6aadff;">Game</div>
         <div class="preset-row" id="preset-game">
@@ -1207,7 +1185,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="preset-section">
         <div class="preset-lbl" style="color:#88cc44;">Barrel / Attach</div>
-        <div class="preset-row">
+        <div class="preset-row" id="preset-attach">
           <button class="pbtn attach" data-k="barrel" data-v="Comp">Comp</button>
           <button class="pbtn attach" data-k="barrel" data-v="Muzzle">Muzzle</button>
           <button class="pbtn attach" data-k="barrel" data-v="Flash">Flash</button>
@@ -1218,7 +1196,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="preset-section">
         <div class="preset-lbl" style="color:#b080ff;">Scope</div>
-        <div class="preset-row">
+        <div class="preset-row" id="preset-scope">
           <button class="pbtn scope" data-k="scope" data-v="Iron">Iron</button>
           <button class="pbtn scope" data-k="scope" data-v="Holo">Holo</button>
           <button class="pbtn scope" data-k="scope" data-v="ACOG">ACOG</button>
@@ -1229,7 +1207,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="preset-section" style="margin-bottom:12px;">
         <div class="preset-lbl" style="color:#ddaa44;">Grip</div>
-        <div class="preset-row">
+        <div class="preset-row" id="preset-grip">
           <button class="pbtn grip" data-k="grip" data-v="Vertical">Vertical</button>
           <button class="pbtn grip" data-k="grip" data-v="Angled">Angled</button>
           <button class="pbtn grip" data-k="grip" data-v="Half">Half</button>
@@ -1281,14 +1259,14 @@ connectWs();
 
 function sendAll() {
   if (ws && ws.readyState===1) ws.send(JSON.stringify({
-    pull_down:              +$('sv').value  || 0,
-    horizontal:             +$('hv').value  || 0,
-    horizontal_delay_ms:    +$('dv').value  || 0,
-    horizontal_duration_ms: +$('uv').value  || 0,
-    vertical_delay_ms:      +$('vdv').value || 0,
-    vertical_duration_ms:   +$('vduv').value|| 0,
-    jitter_strength:        +$('js').value  || 0,
-    smooth_factor:          +$('ss').value  || 0,
+    pull_down:              +$('sv').value  ||0,
+    horizontal:             +$('hv').value  ||0,
+    horizontal_delay_ms:    +$('dv').value  ||0,
+    horizontal_duration_ms: +$('uv').value  ||0,
+    vertical_delay_ms:      +$('vdv').value ||0,
+    vertical_duration_ms:   +$('vduv').value||0,
+    jitter_strength:        +$('js').value  ||0,
+    smooth_factor:          +$('ss').value  ||0,
   }));
 }
 
@@ -1304,15 +1282,26 @@ sync($('vds'),$('vdv')); sync($('vdus'),$('vduv'));
 $('js').oninput=()=>{ $('jv').textContent=parseFloat($('js').value).toFixed(2); sendAll(); };
 $('ss').oninput=()=>{ $('sv2').textContent=parseFloat($('ss').value).toFixed(2); sendAll(); };
 
-// ── Rapid Fire slider sync ────────────────────────────────────────────────────
+// ── BUG FIX: Rapid fire slider/input sync — ส่ง interval ทันทีเมื่อเปลี่ยนค่า ──────
 const rfMs=$('rf-ms'), rfSl=$('rf-sl');
-// FIX: ใช้ oninput แทน onchange เพื่อ sync ทันที
-rfSl.oninput = ()=>{ rfMs.value=rfSl.value; if(rfEnabled) pushRF(); };
+
+function sendRFInterval() {
+  // ส่งค่า interval ไปยัง server เสมอ (ไม่ว่า rfEnabled จะเป็น true/false)
+  // เพื่อให้ server มีค่าล่าสุดพร้อมเสมอเมื่อ enable
+  fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:rfEnabled, interval_ms:safeNum(rfMs.value,100)})
+  }).catch(()=>{});
+}
+
+// BUG FIX: ใช้ 'input' แทน 'change' — 'change' ต้อง blur ก่อนถึงจะ fire
+rfSl.oninput = ()=>{
+  rfMs.value = rfSl.value;
+  sendRFInterval();
+};
 rfMs.oninput = ()=>{
-  const v = Math.max(30, Math.min(2000, safeNum(rfMs.value, 100)));
-  rfMs.value = v;
+  const v = safeNum(rfMs.value, 100);
   rfSl.value = Math.min(v, 500);
-  if(rfEnabled) pushRF();
+  sendRFInterval();
 };
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
@@ -1335,11 +1324,12 @@ function setConnDot(ok) {
   });
 }
 
-// ── Toggle btn ────────────────────────────────────────────────────────────────
+// ── Status ────────────────────────────────────────────────────────────────────
 function setBtn(on) {
   $('toggle-btn').textContent = on ? '■ ON' : '○ OFF';
   $('toggle-btn').className   = on ? 'enabled' : 'disabled';
 }
+
 $('toggle-btn').onclick = ()=>
   fetch('/toggle',{method:'POST'}).then(r=>r.json()).then(d=>setBtn(d.is_enabled));
 
@@ -1347,55 +1337,50 @@ $('tbs').onchange = ()=>
   fetch('/toggle-button',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({button:$('tbs').value})});
 
-// ── Rapid Fire ────────────────────────────────────────────────────────────────
+// ── BUG FIX: Rapid Fire pill — ส่ง interval_ms ทุกครั้งที่กด pill ──────────────
 let rfEnabled = false;
-
-function pushRF() {
-  // FIX: ส่ง interval_ms จาก field ปัจจุบันเสมอ ไม่ใช่ค่าเก่า
-  return fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ enabled: rfEnabled, interval_ms: safeNum(rfMs.value, 100) })
-  }).then(r=>r.json());
-}
-
-$('rf-pill').onclick = ()=>{
+function syncRF() {
   rfEnabled = !rfEnabled;
   $('rf-pill').classList.toggle('on', rfEnabled);
   $('rf-lbl').textContent = rfEnabled ? 'ON' : 'OFF';
-  pushRF().then(d=>{
-    if(d.rapid_fire_enabled) toast('⚡ Rapid Fire ON','var(--or)');
+  // BUG FIX: ส่ง interval_ms จาก input ปัจจุบันทุกครั้ง (ไม่ใช่ค่า default 100)
+  fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:rfEnabled, interval_ms:safeNum(rfMs.value,100)})
+  }).then(r=>r.json()).then(d=>{
+    if(d.rapid_fire_enabled) toast('⚡ Rapid Fire ON  '+d.rapid_fire_interval_ms+'ms','var(--or)');
     else toast('Rapid Fire OFF','var(--mu)');
   });
-};
-
-// ── Hip Fire ──────────────────────────────────────────────────────────────────
-let hfEnabled = false;
-
-function pushHF() {
-  // FIX: อ่านค่าจาก field ปัจจุบัน ไม่ใช่ค่าเก่าที่ cache ไว้
-  return fetch('/hip-fire',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      enabled:    hfEnabled,
-      pull_down:  safeNum($('hf-pd').value),
-      horizontal: safeNum($('hf-hz').value)
-    })
-  }).then(r=>r.json());
 }
+$('rf-pill').onclick = syncRF;
 
+// ── BUG FIX: Hip Fire — ส่งค่าเสมอแม้ pill ปิดอยู่ เพื่อ persist ค่า ──────────
+let hfEnabled = false;
+function sendHF() {
+  // BUG FIX: ส่งเสมอ ไม่ check hfEnabled ก่อน
+  fetch('/hip-fire',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:hfEnabled, pull_down:safeNum($('hf-pd').value), horizontal:safeNum($('hf-hz').value)})
+  }).catch(()=>{});
+}
 $('hf-pill').onclick = ()=>{
   hfEnabled = !hfEnabled;
   $('hf-pill').classList.toggle('on', hfEnabled);
   $('hf-lbl').textContent = hfEnabled ? 'ON' : 'OFF';
-  pushHF().then(()=>{
-    toast(hfEnabled ? '🎯 Hip Fire ON' : 'Hip Fire OFF', hfEnabled ? 'var(--vi)' : 'var(--mu)');
-  });
+  sendHF();
+  toast(hfEnabled ? '🎯 Hip Fire ON' : 'Hip Fire OFF', hfEnabled ? 'var(--vi)' : 'var(--mu)');
 };
+// BUG FIX: ส่งค่าทุกครั้งที่เปลี่ยน (ไม่ว่า enabled หรือไม่)
+$('hf-pd').oninput = sendHF;
+$('hf-hz').oninput = sendHF;
 
-// FIX: ส่งค่า hip fire ทุกครั้งที่กรอก (ไม่ว่า pill จะ ON/OFF)
-// เพื่อให้ backend มีค่าล่าสุดเสมอ พร้อมใช้ทันทีที่กด ON
-$('hf-pd').oninput = ()=> pushHF();
-$('hf-hz').oninput = ()=> pushHF();
+// BUG FIX: ป้องกัน getStatus() overwrite ค่าที่ user กำลังแก้อยู่
+// และ sync ค่า pull_down/horizontal กลับมา UI ตอน init ครั้งแรก
+let _statusInitDone = false;
+let _lastFocusedInput = null;
+document.querySelectorAll('input').forEach(el=>{
+  el.addEventListener('focus', ()=>{ _lastFocusedInput = el.id; });
+  el.addEventListener('blur',  ()=>{ setTimeout(()=>{ if(_lastFocusedInput===el.id) _lastFocusedInput=null; }, 300); });
+});
 
-// ── Status poll ───────────────────────────────────────────────────────────────
 function getStatus() {
   fetch('/status').then(r=>r.json()).then(d=>{
     setBtn(d.is_enabled);
@@ -1410,26 +1395,38 @@ function getStatus() {
     if(d.kmbox_ip && !$('km-ip').value){ $('km-ip').value=d.kmbox_ip; $('km-port').value=d.kmbox_port; }
     setConnDot(!!d.ctrl_connected);
 
-    // Sync rapid fire state จาก backend
-    if(d.rapid_fire_enabled !== rfEnabled){
-      rfEnabled = d.rapid_fire_enabled;
-      $('rf-pill').classList.toggle('on', rfEnabled);
-      $('rf-lbl').textContent = rfEnabled ? 'ON' : 'OFF';
-    }
-    if(d.rapid_fire_interval_ms){
-      rfMs.value = d.rapid_fire_interval_ms;
-      rfSl.value = Math.min(d.rapid_fire_interval_ms, 500);
+    // BUG FIX: sync pull_down/horizontal กลับมา UI ตอน init ครั้งแรกเท่านั้น
+    // ไม่ overwrite ทุก poll เพราะจะทำให้ config ที่โหลดถูก reset
+    if(!_statusInitDone) {
+      if(d.pull_down  !==undefined){ $('sv').value=d.pull_down;   $('sl').value=Math.round(d.pull_down); }
+      if(d.horizontal !==undefined){ $('hv').value=d.horizontal;  $('hs').value=Math.round(d.horizontal); }
+      if(d.horizontal_delay_ms   !==undefined){ $('dv').value=d.horizontal_delay_ms;   $('ds').value=d.horizontal_delay_ms; }
+      if(d.horizontal_duration_ms!==undefined){ $('uv').value=d.horizontal_duration_ms;$('us').value=d.horizontal_duration_ms; }
+      if(d.vertical_delay_ms     !==undefined){ $('vdv').value=d.vertical_delay_ms;    $('vds').value=d.vertical_delay_ms; }
+      if(d.vertical_duration_ms  !==undefined){ $('vduv').value=d.vertical_duration_ms;$('vdus').value=d.vertical_duration_ms; }
+      _statusInitDone = true;
     }
 
-    // Sync hip fire state จาก backend
-    if(d.hip_fire_enabled !== hfEnabled){
-      hfEnabled = d.hip_fire_enabled;
-      $('hf-pill').classList.toggle('on', hfEnabled);
-      $('hf-lbl').textContent = hfEnabled ? 'ON' : 'OFF';
+    // Rapid fire sync — เฉพาะถ้า state ต่างกัน (ไม่ใช่ user กำลังแก้)
+    if(d.rapid_fire_enabled!==undefined && d.rapid_fire_enabled!==rfEnabled){
+      rfEnabled=d.rapid_fire_enabled;
+      $('rf-pill').classList.toggle('on',rfEnabled); $('rf-lbl').textContent=rfEnabled?'ON':'OFF';
     }
-    if(d.hip_pull_down  !== undefined) $('hf-pd').value = d.hip_pull_down;
-    if(d.hip_horizontal !== undefined) $('hf-hz').value = d.hip_horizontal;
+    // BUG FIX: sync interval เฉพาะตอน init หรือถ้า user ไม่ได้ focus อยู่
+    if(d.rapid_fire_interval_ms && _lastFocusedInput!=='rf-ms') {
+      rfMs.value=d.rapid_fire_interval_ms;
+      rfSl.value=Math.min(d.rapid_fire_interval_ms,500);
+    }
 
+    // Hip fire pill state sync
+    if(d.hip_fire_enabled!==undefined && d.hip_fire_enabled!==hfEnabled){
+      hfEnabled=d.hip_fire_enabled;
+      $('hf-pill').classList.toggle('on',hfEnabled); $('hf-lbl').textContent=hfEnabled?'ON':'OFF';
+    }
+    // BUG FIX: ไม่ overwrite hf-pd / hf-hz ถ้า user กำลัง focus อยู่
+    // เพราะจะทำให้ค่าที่โหลดจาก config ถูก overwrite ด้วยค่า server (0)
+    if(d.hip_pull_down  !==undefined && _lastFocusedInput!=='hf-pd') $('hf-pd').value=d.hip_pull_down;
+    if(d.hip_horizontal !==undefined && _lastFocusedInput!=='hf-hz') $('hf-hz').value=d.hip_horizontal;
   }).catch(()=>{});
 }
 getStatus();
@@ -1542,6 +1539,7 @@ function getCurve(){
 
 // ── Preset tag buttons ────────────────────────────────────────────────────────
 let currentTags = {};
+
 document.querySelectorAll('.pbtn').forEach(btn=>{
   btn.addEventListener('click',()=>{
     const k=btn.dataset.k, v=btn.dataset.v;
@@ -1646,68 +1644,41 @@ function updBrowseLbl(){
   lbl.innerHTML='Selected — <span style="color:var(--ac);font-family:var(--mo)">'+name+'</span>';
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  FIX: cfgdd.onchange — โหลด config ปืนแล้ว sync ค่าทั้งหมดไป backend
-//  รวมถึง hip fire ซึ่ง v5.0/v5.1 ไม่ได้ส่ง
-// ══════════════════════════════════════════════════════════════════════════════
-$('cfgdd').onchange = ()=>{
-  const key=$('cfgdd').value; updBrowseLbl(); if(!key) return;
-  const cfg=cache[key]; if(cfg==null) return;
-
-  // ── โหลดค่า recoil ──────────────────────────────────────────────────────────
-  const pd  = typeof cfg==='object' ? (cfg.pull_down  ?? 0) : (cfg ?? 0);
-  const hz  = typeof cfg==='object' ? (cfg.horizontal ?? 0) : 0;
-  const dl  = typeof cfg==='object' ? (cfg.horizontal_delay_ms    ?? 500)  : 500;
-  const du  = typeof cfg==='object' ? (cfg.horizontal_duration_ms ?? 2000) : 2000;
-  const vdl = typeof cfg==='object' ? (cfg.vertical_delay_ms      ?? 0)    : 0;
-  const vdu = typeof cfg==='object' ? (cfg.vertical_duration_ms   ?? 0)    : 0;
-
-  $('sv').value=pd;   $('sl').value=Math.round(pd);
-  $('hv').value=hz;   $('hs').value=Math.round(hz);
-  $('dv').value=dl;   $('ds').value=dl;
-  $('uv').value=du;   $('us').value=du;
-  $('vdv').value=vdl; $('vds').value=vdl;
+$('cfgdd').onchange=()=>{
+  const key=$('cfgdd').value;updBrowseLbl();if(!key)return;
+  const cfg=cache[key];if(cfg==null)return;
+  const pd=typeof cfg==='object'?(cfg.pull_down??0):(cfg??0);
+  const hz=typeof cfg==='object'?(cfg.horizontal??0):0;
+  const dl=typeof cfg==='object'?(cfg.horizontal_delay_ms??500):500;
+  const du=typeof cfg==='object'?(cfg.horizontal_duration_ms??2000):2000;
+  const vdl=typeof cfg==='object'?(cfg.vertical_delay_ms??0):0;
+  const vdu=typeof cfg==='object'?(cfg.vertical_duration_ms??0):0;
+  $('sv').value=pd;$('sl').value=Math.round(pd);
+  $('hv').value=hz;$('hs').value=Math.round(hz);
+  $('dv').value=dl;$('ds').value=dl;
+  $('uv').value=du;$('us').value=du;
+  $('vdv').value=vdl;$('vds').value=vdl;
   $('vduv').value=vdu;$('vdus').value=vdu;
-
-  // ── FIX: โหลดค่า hip fire จาก config ────────────────────────────────────────
-  // ใช้ค่าจาก config ถ้ามี ไม่มีให้ใช้ค่าที่ field แสดงอยู่ (คงค่าเดิม)
-  const newHfPd = (cfg.hip_pull_down  !== undefined) ? cfg.hip_pull_down  : safeNum($('hf-pd').value);
-  const newHfHz = (cfg.hip_horizontal !== undefined) ? cfg.hip_horizontal : safeNum($('hf-hz').value);
-  $('hf-pd').value = newHfPd;
-  $('hf-hz').value = newHfHz;
-
-  // FIX: ส่งค่า hip fire ใหม่ไป backend เสมอ (ทั้ง ON และ OFF)
-  // เพราะ backend ต้องมีค่าล่าสุด พร้อมใช้งานทันทีเมื่อกด ON
-  fetch('/hip-fire',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ enabled: hfEnabled, pull_down: newHfPd, horizontal: newHfHz })
-  });
-
-  // ── โหลด curve ───────────────────────────────────────────────────────────────
-  const hasCurve = typeof cfg==='object' && cfg.pull_down_curve;
-  $('cpv').style.display = hasCurve ? 'inline-flex' : 'none';
-  restoreCurve(hasCurve ? cfg.pull_down_curve : null);
-
-  // ── ส่งค่า recoil ผ่าน WS ───────────────────────────────────────────────────
+  if(cfg.hip_pull_down!==undefined) $('hf-pd').value=cfg.hip_pull_down;
+  if(cfg.hip_horizontal!==undefined) $('hf-hz').value=cfg.hip_horizontal;
+  const hasCurve=typeof cfg==='object'&&cfg.pull_down_curve;
+  $('cpv').style.display=hasCurve?'inline-flex':'none';
+  restoreCurve(hasCurve?cfg.pull_down_curve:null);
   sendAll();
-  if(ws && ws.readyState===1)
-    ws.send(JSON.stringify({ pull_down_curve: hasCurve ? cfg.pull_down_curve : [] }));
-
-  // ── โหลด metadata ────────────────────────────────────────────────────────────
-  const name = typeof cfg==='object' ? (cfg.name || key) : key;
-  $('cfg-name').value = name;
-  currentTags = typeof cfg==='object' && cfg.tags ? {...cfg.tags} : {};
-
-  // reset preset button highlights
+  if(ws&&ws.readyState===1) ws.send(JSON.stringify({pull_down_curve:hasCurve?cfg.pull_down_curve:[]}));
+  const name=typeof cfg==='object'?(cfg.name||key):key;
+  $('cfg-name').value=name;
+  currentTags=typeof cfg==='object'&&cfg.tags?{...cfg.tags}:{};
   document.querySelectorAll('.pbtn').forEach(b=>{ b.style.opacity='1'; b.style.borderWidth='1px'; });
   Object.entries(currentTags).forEach(([k,v])=>{
     document.querySelectorAll(`.pbtn[data-k="${k}"][data-v="${v}"]`).forEach(b=>{ b.style.opacity='1'; b.style.borderWidth='2px'; });
     document.querySelectorAll(`.pbtn[data-k="${k}"]:not([data-v="${v}"])`).forEach(b=>{ b.style.opacity='0.45'; });
   });
-  renderTagChips(); updSavePreview();
+  renderTagChips();updSavePreview();
   toast('✓ Loaded: '+name);
 };
 
-$('search').oninput = filterBrowse;
+$('search').oninput=filterBrowse;
 
 function showWarn(msg){ $('warn-txt').textContent=msg; $('warn').classList.add('show'); setTimeout(()=>$('warn').classList.remove('show'),3000); }
 
@@ -1715,7 +1686,7 @@ function buildPayload(name){
   const c=getCurve();
   return{
     name,
-    tags: Object.keys(currentTags).length>0 ? currentTags : null,
+    tags:Object.keys(currentTags).length>0?currentTags:null,
     pull_down_value:        safeNum($('sv').value),
     vertical_delay_ms:      safeNum($('vdv').value),
     vertical_duration_ms:   safeNum($('vduv').value),
@@ -1724,15 +1695,14 @@ function buildPayload(name){
     horizontal_duration_ms: safeNum($('uv').value),
     hip_pull_down:          safeNum($('hf-pd').value),
     hip_horizontal:         safeNum($('hf-hz').value),
-    ...(c ? {pull_down_curve:c} : {})
+    ...(c?{pull_down_curve:c}:{})
   };
 }
 
 $('save-btn').onclick=()=>{
-  const name=$('cfg-name').value.trim(); if(!name){showWarn('กรอกชื่อก่อน');return;}
+  const name=$('cfg-name').value.trim();if(!name){showWarn('กรอกชื่อก่อน');return;}
   fetch('/configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload(name))})
-    .then(r=>r.json()).then(d=>{ if(d.detail)showWarn(d.detail); else{fetchConfigs();toast('✓ Saved: '+name);} })
-    .catch(()=>showWarn('บันทึกไม่สำเร็จ'));
+    .then(r=>r.json()).then(d=>{ if(d.detail)showWarn(d.detail); else{fetchConfigs();toast('✓ Saved: '+name);} }).catch(()=>showWarn('บันทึกไม่สำเร็จ'));
 };
 $('overwrite-btn').onclick=()=>{
   const key=$('cfgdd').value,name=$('cfg-name').value.trim()||key;
@@ -1749,7 +1719,7 @@ $('overwrite-btn').onclick=()=>{
     }).catch(()=>showWarn('Overwrite ไม่สำเร็จ'));
 };
 $('delete-btn').onclick=()=>{
-  const key=$('cfgdd').value; if(!key){showWarn('เลือก config ที่ต้องการลบก่อน');return;}
+  const key=$('cfgdd').value;if(!key){showWarn('เลือก config ที่ต้องการลบก่อน');return;}
   if(!confirm('ลบ "'+key+'"?'))return;
   fetch('/configs/'+encodeURIComponent(key),{method:'DELETE'})
     .then(()=>{fetchConfigs();toast('Deleted: '+key,'var(--rd)');}).catch(()=>{});
@@ -1758,7 +1728,7 @@ $('delete-btn').onclick=()=>{
 // ── Profile management ────────────────────────────────────────────────────────
 function fetchCfgFiles(){
   fetch('/config-files').then(r=>r.json()).then(d=>{
-    const dd=$('cfgfd'); dd.innerHTML='';
+    const dd=$('cfgfd');dd.innerHTML='';
     d.files.forEach(f=>{ const o=document.createElement('option');o.value=f;o.textContent=f.replace('.json','');dd.appendChild(o); });
     dd.value=d.current;
     $('cfg-badge').textContent=d.current.replace('.json','');
@@ -1768,25 +1738,25 @@ $('cfgfd').onchange=()=>{
   fetch('/config-files/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:$('cfgfd').value})})
     .then(r=>r.json()).then(d=>{
       $('cfg-badge').textContent=d.current_config_file.replace('.json','');
-      cache=d.guns; allKeys=Object.keys(d.guns);
-      buildTagFilters(); filterBrowse();
+      cache=d.guns;allKeys=Object.keys(d.guns);
+      buildTagFilters();filterBrowse();
       toast('Profile: '+d.current_config_file.replace('.json',''));
     }).catch(()=>{});
 };
 $('create-cfg').onclick=()=>{
-  const n=$('new-cfg-name').value.trim(); if(!n) return;
+  const n=$('new-cfg-name').value.trim();if(!n)return;
   fetch('/config-files',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:n})})
     .then(r=>r.json()).then(()=>{fetchCfgFiles();$('new-cfg-name').value='';toast('✓ Profile created: '+n);}).catch(()=>{});
 };
 $('delete-cfg').onclick=()=>{
-  const f=$('cfgfd').value; if(!f||f==='default.json') return;
+  const f=$('cfgfd').value;if(!f||f==='default.json')return;
   if(confirm('ลบ profile "'+f+'"?'))
     fetch('/config-files/'+encodeURIComponent(f),{method:'DELETE'})
       .then(()=>{fetchCfgFiles();toast('Profile deleted','var(--rd)');}).catch(()=>{});
 };
 
 // Init
-fetchConfigs(); fetchCfgFiles(); updSavePreview();
+fetchConfigs();fetchCfgFiles();updSavePreview();
 });
 </script>
 </body>
@@ -1811,7 +1781,7 @@ def get_local_ip():
 
 if __name__ == "__main__":
     ip = get_local_ip()
-    print(f"\n  ┌─ RVN v5.2 ─────────────────────────────────────────┐")
+    print(f"\n  ┌─ RVN v5.1 ─────────────────────────────────────────┐")
     print(f"  │  Local  : http://localhost:8000                    │")
     print(f"  │  Network: http://{ip}:8000        │")
     print(f"  └────────────────────────────────────────────────────┘\n")
