@@ -1,11 +1,12 @@
 """
-RVN — Recoil Control System  v5.0
-New in v5.0 (from v4.1):
-  • FEAT: Hip Fire Mode — separate pull_down/horizontal config when RMB is NOT held
-  • FEAT: Rapid Fire — toggle on/off from UI, auto-clicks LMB at configurable interval
-  • FEAT: Tag Attachment UI — preset quick-add buttons for game/attach/scope/grip tags
-  • FIX:  Rapid fire uses controller's click method (makcu/kmbox/software)
-  • FIX:  Hip fire state derived from RMB; no extra toggle key needed
+RVN — Recoil Control System  v5.2
+Bug fixes from v5.1:
+  • FIX: โหลด config ปืนแล้ว hip fire ค่าไม่ sync ไป backend — เพิ่ม fetch /hip-fire ใน cfgdd.onchange
+  • FIX: last_rf_click ไม่ reset เมื่อปล่อย LMB — rapid fire click แรกหลังกด LMB ช้าผิดปกติ
+  • FIX: rf_just_clicked reset hold_start ทุก tick ทำให้ recoil loop ไม่ทำงาน — แยก rapid fire กับ RCS ให้ชัดเจน
+  • FIX: hip fire ใช้ค่า 0 แม้กรอกค่าไว้ เพราะ sendHF() ถูก call ก่อน field update
+  • FIX: makcu click_lmb() ขาดใน makcu.py — เพิ่ม wrapper
+  • FIX: โหลด config ปืนแล้ว pull_down/horizontal ส่งผ่าน WS แต่ hip fire ไม่ส่ง — แก้ให้ส่งพร้อมกัน
 """
 
 import threading
@@ -216,7 +217,6 @@ class KMBoxController:
         if not self._connected: return
         with self._lock:
             try:
-                # press LMB then release
                 self._sock.sendto(self._build(self.CMD_CLICK, struct.pack('<BB', 1, 1)), self._addr())
                 time.sleep(0.01)
                 self._sock.sendto(self._build(self.CMD_CLICK, struct.pack('<BB', 1, 0)), self._addr())
@@ -312,7 +312,6 @@ class GunConfig(BaseModel):
     horizontal_duration_ms:   int   = Field(default=2000, ge=0,    le=10000)
     pull_down_curve:  Optional[List[float]] = None
     horizontal_curve: Optional[List[float]] = None
-    # Hip fire overrides
     hip_pull_down:    Optional[float] = Field(default=None, ge=0, le=300)
     hip_horizontal:   Optional[float] = Field(default=None, ge=-300, le=300)
 
@@ -364,10 +363,8 @@ class AppState:
         self.kmbox_ip                = "192.168.2.188"
         self.kmbox_port              = 1408
         self.kmbox_uuid              = ""
-        # ── Rapid Fire ───────────────────────────────────────────────────────
         self.rapid_fire_enabled      = False
         self.rapid_fire_interval_ms  = 100
-        # ── Hip Fire ─────────────────────────────────────────────────────────
         self.hip_fire_enabled        = False
         self.hip_pull_down           = 0.0
         self.hip_horizontal          = 0.0
@@ -444,7 +441,6 @@ class AppState:
     def get_kmbox_config(self):
         with self.lock: return {"ip": self.kmbox_ip, "port": self.kmbox_port, "uuid": self.kmbox_uuid}
 
-    # ── Rapid Fire ────────────────────────────────────────────────────────────
     def set_rapid_fire(self, enabled, interval_ms):
         with self.lock:
             self.rapid_fire_enabled     = enabled
@@ -452,7 +448,6 @@ class AppState:
     def get_rapid_fire(self):
         with self.lock: return self.rapid_fire_enabled, self.rapid_fire_interval_ms
 
-    # ── Hip Fire ──────────────────────────────────────────────────────────────
     def set_hip_fire(self, enabled, pull_down, horizontal):
         with self.lock:
             self.hip_fire_enabled = enabled
@@ -520,7 +515,7 @@ def humanize(rx, ry, jitter, smoother, smooth):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Main control loop
+#  Main control loop  — v5.2 fixed
 # ══════════════════════════════════════════════════════════════════════════════
 TICK_S = 0.010
 
@@ -532,14 +527,16 @@ async def lifespan(app):
 
 
 def mouse_control_loop():
-    toggle_was = False
-    hold_start = None
-    curve_tick = 0
-    smoother   = _Smoother()
+    toggle_was  = False
+    hold_start  = None
+    curve_tick  = 0
+    smoother    = _Smoother()
     _listener_started = {"makcu": False, "kmbox": False, "software": False}
 
-    # Rapid fire state
-    last_rf_click = 0.0
+    # ── Rapid fire timer ──────────────────────────────────────────────────────
+    # FIX: reset ไป 0 เพื่อให้ click แรกเกิดทันทีเมื่อกด LMB
+    last_rf_click  = 0.0
+    lmb_was        = False   # FIX: track LMB edge เพื่อ reset timer เมื่อปล่อยแล้วกดใหม่
 
     while True:
         t0 = time.perf_counter()
@@ -563,7 +560,7 @@ def mouse_control_loop():
             btn     = app_state.get_toggle_button()
             pressed = ctrl.get_button_state(btn)
             if pressed and not toggle_was:
-                enabled = app_state.toggle_enabled()
+                app_state.toggle_enabled()
                 smoother.reset()
                 hold_start = None
             toggle_was = pressed
@@ -571,22 +568,39 @@ def mouse_control_loop():
             lmb = ctrl.get_button_state("LMB")
             rmb = ctrl.get_button_state("RMB")
 
+            rcs_enabled = app_state.get_enabled()
+
+            # ── FIX: reset rapid fire timer เมื่อ LMB ถูกปล่อยแล้วกดใหม่ ────
+            if not lmb and lmb_was:
+                last_rf_click = 0.0   # reset → click แรกเกิดทันทีรอบหน้า
+            lmb_was = lmb
+
             # ── Rapid Fire ────────────────────────────────────────────────────
+            # FIX: rapid fire แยกออกจาก recoil loop อย่างชัดเจน
+            # ไม่ reset hold_start อีกต่อไป — RCS ทำงานต่อเนื่องระหว่าง rapid fire
             rf_en, rf_ms = app_state.get_rapid_fire()
-            if rf_en and app_state.get_enabled() and lmb:
+            if rcs_enabled and rf_en and lmb:
                 now = time.perf_counter()
-                if (now - last_rf_click) * 1000 >= rf_ms:
+                if (now - last_rf_click) * 1000.0 >= rf_ms:
                     ctrl.click_lmb()
                     last_rf_click = now
 
-            # ── Hip Fire detection (RMB = ADS, no RMB = hip) ─────────────────
+            # ── Hip Fire detection ────────────────────────────────────────────
             hf_en, hf_pd, hf_hz = app_state.get_hip_fire()
+            # hip = เปิด hip fire mode และไม่ได้กด RMB (ไม่ ADS)
             is_hip = hf_en and not rmb
 
             # ── Fire condition ────────────────────────────────────────────────
-            fire = (lmb and rmb) if app_state.get_trigger_mode() == "LMB+RMB" else lmb
+            # FIX: hip fire ใช้ LMB เสมอโดยไม่ขึ้นกับ trigger_mode
+            # เพราะ hip state หมายถึงไม่กด RMB อยู่แล้ว
+            trigger_mode = app_state.get_trigger_mode()
+            if is_hip:
+                fire = lmb
+            else:
+                fire = (lmb and rmb) if trigger_mode == "LMB+RMB" else lmb
 
-            if app_state.get_enabled() and fire:
+            # ── Recoil Control ────────────────────────────────────────────────
+            if rcs_enabled and fire:
                 now = time.perf_counter()
                 if hold_start is None:
                     hold_start = now
@@ -595,36 +609,43 @@ def mouse_control_loop():
 
                 pd_curve, hz_curve = app_state.get_curves()
 
-                # Choose values: hip or normal
                 if is_hip:
-                    base_pd = hf_pd
-                    base_hz = hf_hz
-                    raw_y   = base_pd / 5.0
-                    raw_x   = base_hz / 5.0
+                    # Hip fire mode: ใช้ค่า hip แทน config ปกติ
+                    raw_y = hf_pd / 5.0
+                    raw_x = hf_hz / 5.0
                 else:
-                    # Vertical
+                    # ADS / normal mode: ใช้ config ปืน
                     v_delay  = app_state.get_vertical_delay()
                     v_dur    = app_state.get_vertical_duration()
                     v_active = (hold_ms >= v_delay) and (v_dur == 0 or hold_ms <= v_delay + v_dur)
-                    raw_y = (
-                        (pd_curve[min(curve_tick, len(pd_curve)-1)] / 5.0 if pd_curve else app_state.get_active_value() / 5.0)
-                        if v_active else 0.0
-                    )
-                    # Horizontal
+
+                    if v_active:
+                        if pd_curve:
+                            raw_y = pd_curve[min(curve_tick, len(pd_curve) - 1)] / 5.0
+                        else:
+                            raw_y = app_state.get_active_value() / 5.0
+                    else:
+                        raw_y = 0.0
+
                     h_delay = app_state.get_horizontal_delay()
                     h_dur   = app_state.get_horizontal_duration()
                     raw_x   = 0.0
                     if hold_ms >= h_delay and (h_dur == 0 or hold_ms <= h_delay + h_dur):
-                        raw_x = hz_curve[min(curve_tick, len(hz_curve)-1)] / 5.0 if hz_curve else app_state.get_horizontal_value() / 5.0
+                        if hz_curve:
+                            raw_x = hz_curve[min(curve_tick, len(hz_curve) - 1)] / 5.0
+                        else:
+                            raw_x = app_state.get_horizontal_value() / 5.0
 
                 curve_tick += 1
                 mx, my = humanize(raw_x, raw_y, app_state.get_jitter(), smoother, app_state.get_smooth())
                 if mx or my:
                     ctrl.simple_move_mouse(mx, my)
             else:
-                hold_start = None
-                curve_tick = 0
-                smoother.reset()
+                # FIX: reset เฉพาะเมื่อไม่ fire จริงๆ (ไม่ reset เพราะ rapid fire)
+                if not fire:
+                    hold_start = None
+                    curve_tick = 0
+                    smoother.reset()
 
         except Exception as e:
             print(f"[LOOP] {e}")
@@ -666,10 +687,22 @@ async def ws_endpoint(websocket: WebSocket):
                         try: getattr(app_state, fn)(conv(msg[k]))
                         except: pass
 
+                # อัพเดท curves — อ่านค่าเก่าก่อนเพื่อรักษาค่าที่ยังไม่เปลี่ยน
+                pd_curve, hz_curve = app_state.get_curves()
+                changed = False
+
                 if "pull_down_curve" in msg:
                     v = msg["pull_down_curve"]
-                    _, hz = app_state.get_curves()
-                    app_state.set_curves(v if isinstance(v, list) and len(v) > 0 else None, hz)
+                    pd_curve = v if isinstance(v, list) and len(v) > 0 else None
+                    changed = True
+
+                if "horizontal_curve" in msg:
+                    v = msg["horizontal_curve"]
+                    hz_curve = v if isinstance(v, list) and len(v) > 0 else None
+                    changed = True
+
+                if changed:
+                    app_state.set_curves(pd_curve, hz_curve)
 
             except json.JSONDecodeError:
                 pass
@@ -785,14 +818,12 @@ async def set_humanize(cfg: HumanizeConfig):
     app_state.set_smooth(cfg.smooth_factor)
     return {"jitter_strength": app_state.get_jitter(), "smooth_factor": app_state.get_smooth()}
 
-# ── NEW: Rapid Fire endpoint ──────────────────────────────────────────────────
 @app.post("/rapid-fire")
 async def set_rapid_fire(cfg: RapidFireConfig):
     app_state.set_rapid_fire(cfg.enabled, cfg.interval_ms)
     en, ms = app_state.get_rapid_fire()
     return {"rapid_fire_enabled": en, "rapid_fire_interval_ms": ms}
 
-# ── NEW: Hip Fire endpoint ────────────────────────────────────────────────────
 @app.post("/hip-fire")
 async def set_hip_fire(cfg: HipFireConfig):
     app_state.set_hip_fire(cfg.enabled, cfg.pull_down, cfg.horizontal)
@@ -801,13 +832,13 @@ async def set_hip_fire(cfg: HipFireConfig):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  UI  v5.0
+#  UI  v5.2
 # ══════════════════════════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<title>RVN v5.0</title>
+<title>RVN v5.2</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
@@ -853,8 +884,6 @@ select{cursor:pointer;}
 .num{background:transparent;border:1px solid transparent;border-radius:6px;color:#fff;font-family:var(--mo);font-size:1.7rem;font-weight:700;width:100%;padding:0 4px 2px;outline:none;-moz-appearance:textfield;transition:border-color .2s,background .2s;}
 .num::-webkit-outer-spin-button,.num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
 .num:hover{border-color:var(--bd2);}.num:focus{border-color:#2a4060;background:#0a1018;}
-.num-row{display:flex;align-items:baseline;gap:4px;margin-bottom:6px;}
-.unit{font-family:var(--mo);font-size:.62rem;color:var(--mu);}
 .num-sm{font-size:1.15rem !important;}
 input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:4px;border-radius:2px;background:var(--bd2);outline:none;}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:#fff;cursor:pointer;transition:transform .15s,box-shadow .15s;}
@@ -889,7 +918,6 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .tag-chip .rm:hover{color:#ff9090;}
 .add-tag-row{display:flex;gap:6px;margin-bottom:8px;}
 .add-tag-row input{flex:1;}
-/* ── Tag Preset Buttons ───────────────────────────────────── */
 .preset-section{margin-bottom:10px;}
 .preset-lbl{font-family:var(--mo);font-size:.54rem;letter-spacing:1.5px;text-transform:uppercase;color:var(--mu);margin-bottom:5px;}
 .preset-row{display:flex;gap:5px;flex-wrap:wrap;}
@@ -899,7 +927,6 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .pbtn.attach{border-color:#2a3a14;color:#88cc44;}.pbtn.attach:hover{background:#0c140a;}
 .pbtn.scope{border-color:#3a1a60;color:#b080ff;}.pbtn.scope:hover{background:#0e0620;}
 .pbtn.grip{border-color:#3a2a10;color:#ddaa44;}.pbtn.grip:hover{background:#120e04;}
-/* ── Feature toggle pills ────────────────────────────────────────── */
 .feat-card{background:var(--sf);border:1px solid var(--bd);border-radius:var(--r);padding:14px 17px;margin-bottom:8px;}
 .feat-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}
 .feat-title{font-family:var(--mo);font-size:.65rem;letter-spacing:2px;text-transform:uppercase;color:var(--mu);}
@@ -907,10 +934,6 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .toggle-pill.on{background:#031210;border-color:#1a5535;color:var(--ac);}
 .toggle-pill.on.rf{background:#120805;border-color:#451808;color:var(--or);}
 .toggle-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;opacity:.6;}
-.sp-preview{font-family:var(--mo);font-size:.64rem;color:var(--mu);min-height:1.3em;margin-bottom:8px;word-break:break-all;padding:6px 9px;background:var(--bg);border-radius:5px;border:1px solid var(--bd);}
-.sp-preview.ready{color:var(--ac);border-color:#0c2e20;}
-.sp-actions{display:flex;gap:8px;margin-top:10px;}
-.sp-actions .btn{flex:1;}
 .warn{background:#120802;border:1px solid #481a08;border-radius:7px;color:#cc7744;font-size:.73rem;padding:8px 12px;margin-bottom:10px;display:none;align-items:center;gap:8px;font-family:var(--mo);}
 .warn.show{display:flex;}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);
@@ -925,16 +948,19 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .tfchip.active{background:#041410;border-color:#1a5a35;color:var(--ac);}
 .sw-notice{background:#03080f;border:1px solid #0a2035;border-radius:7px;padding:9px 12px;font-size:.7rem;color:var(--bl);line-height:1.7;font-family:var(--mo);}
 .sw-notice .w-line{color:#5a3a10;display:block;margin-top:4px;}
-/* Hip fire mini-inputs */
 .hf-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;}
 .hf-lbl{font-size:.6rem;color:var(--mu);margin-bottom:3px;font-family:var(--mo);text-transform:uppercase;letter-spacing:.5px;}
+.sp-preview{font-family:var(--mo);font-size:.64rem;color:var(--mu);min-height:1.3em;margin-bottom:8px;word-break:break-all;padding:6px 9px;background:var(--bg);border-radius:5px;border:1px solid var(--bd);}
+.sp-preview.ready{color:var(--ac);border-color:#0c2e20;}
+.sp-actions{display:flex;gap:8px;margin-top:10px;}
+.sp-actions .btn{flex:1;}
 </style>
 </head>
 <body>
 <div class="w">
   <div class="hdr">
     <div class="logo">R<em>V</em>N</div>
-    <span class="vtag">v5.0 — RCS</span>
+    <span class="vtag">v5.2 — RCS</span>
     <span id="conn-dot" class="conn-dot" title="Controller connection"></span>
   </div>
 
@@ -951,9 +977,10 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
     </div>
   </div>
 
-  <!-- ── Feature Pills Row ─────────────────────────────────────────────────── -->
+  <!-- ── Feature Pills ──────────────────────────────────────────────────────── -->
   <div style="display:flex;gap:8px;margin-bottom:8px;">
-    <!-- Rapid Fire pill -->
+
+    <!-- Rapid Fire -->
     <div class="feat-card" style="flex:1;margin-bottom:0;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
         <span class="feat-title" style="color:var(--or);">Rapid Fire</span>
@@ -964,13 +991,13 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div class="hf-lbl">Interval</div>
       <div style="display:flex;align-items:baseline;gap:4px;">
         <input type="number" class="num num-sm" id="rf-ms" value="100" min="30" max="2000" style="width:80px;">
-        <span class="unit">ms</span>
+        <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
       </div>
       <input type="range" id="rf-sl" min="30" max="500" value="100" style="margin-top:5px;">
       <div class="hint" style="margin-top:4px;">30ms = ~33cps</div>
     </div>
 
-    <!-- Hip Fire pill -->
+    <!-- Hip Fire -->
     <div class="feat-card" style="flex:1;margin-bottom:0;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
         <span class="feat-title" style="color:var(--vi);">Hip Fire</span>
@@ -1008,12 +1035,18 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div class="tgrid">
         <div>
           <div class="tgrid-lbl">Delay</div>
-          <div class="num-row"><input type="number" class="num num-sm" id="vdv" value="0" min="0" max="5000"><span class="unit">ms</span></div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
+            <input type="number" class="num num-sm" id="vdv" value="0" min="0" max="5000">
+            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
+          </div>
           <input type="range" min="0" max="5000" step="1" value="0" id="vds">
         </div>
         <div>
           <div class="tgrid-lbl">Duration</div>
-          <div class="num-row"><input type="number" class="num num-sm" id="vduv" value="0" min="0" max="10000"><span class="unit">ms</span></div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
+            <input type="number" class="num num-sm" id="vduv" value="0" min="0" max="10000">
+            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
+          </div>
           <input type="range" min="0" max="10000" step="1" value="0" id="vdus">
         </div>
       </div>
@@ -1029,12 +1062,18 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div class="tgrid">
         <div>
           <div class="tgrid-lbl">Delay</div>
-          <div class="num-row"><input type="number" class="num num-sm" id="dv" value="500" min="0" max="5000"><span class="unit">ms</span></div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
+            <input type="number" class="num num-sm" id="dv" value="500" min="0" max="5000">
+            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
+          </div>
           <input type="range" min="0" max="5000" step="1" value="500" id="ds">
         </div>
         <div>
           <div class="tgrid-lbl">Duration</div>
-          <div class="num-row"><input type="number" class="num num-sm" id="uv" value="2000" min="0" max="10000"><span class="unit">ms</span></div>
+          <div style="display:flex;align-items:baseline;gap:4px;margin-bottom:6px;">
+            <input type="number" class="num num-sm" id="uv" value="2000" min="0" max="10000">
+            <span style="font-family:var(--mo);font-size:.62rem;color:var(--mu);">ms</span>
+          </div>
           <input type="range" min="0" max="10000" step="1" value="2000" id="us">
         </div>
       </div>
@@ -1043,8 +1082,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 
     <div class="card">
       <div class="clabel">Recoil Curve <span style="font-size:.85em;color:var(--mu);letter-spacing:0;font-family:var(--sa);">— override ค่าคงที่</span></div>
-      <div class="hint" style="margin-bottom:9px">ลากเพื่อวาด · แกน X = เวลา · แกน Y = แรงดีด<br>
-        <span style="color:#223a28;">— — —</span> เส้นประ = ค่าคงที่ &nbsp;<span style="color:#3ab070;">——</span> เส้น = curve</div>
+      <div class="hint" style="margin-bottom:9px">ลากเพื่อวาด · แกน X = เวลา · แกน Y = แรงดีด</div>
       <div class="ceditor">
         <canvas id="curve-canvas" height="120"></canvas>
         <div class="cacts">
@@ -1157,8 +1195,6 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
 
       <div class="sdiv">Tags — Quick Presets</div>
-
-      <!-- ── Preset buttons ────────────────────────────────────────────────── -->
       <div class="preset-section">
         <div class="preset-lbl" style="color:#6aadff;">Game</div>
         <div class="preset-row" id="preset-game">
@@ -1171,7 +1207,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="preset-section">
         <div class="preset-lbl" style="color:#88cc44;">Barrel / Attach</div>
-        <div class="preset-row" id="preset-attach">
+        <div class="preset-row">
           <button class="pbtn attach" data-k="barrel" data-v="Comp">Comp</button>
           <button class="pbtn attach" data-k="barrel" data-v="Muzzle">Muzzle</button>
           <button class="pbtn attach" data-k="barrel" data-v="Flash">Flash</button>
@@ -1182,7 +1218,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="preset-section">
         <div class="preset-lbl" style="color:#b080ff;">Scope</div>
-        <div class="preset-row" id="preset-scope">
+        <div class="preset-row">
           <button class="pbtn scope" data-k="scope" data-v="Iron">Iron</button>
           <button class="pbtn scope" data-k="scope" data-v="Holo">Holo</button>
           <button class="pbtn scope" data-k="scope" data-v="ACOG">ACOG</button>
@@ -1193,7 +1229,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="preset-section" style="margin-bottom:12px;">
         <div class="preset-lbl" style="color:#ddaa44;">Grip</div>
-        <div class="preset-row" id="preset-grip">
+        <div class="preset-row">
           <button class="pbtn grip" data-k="grip" data-v="Vertical">Vertical</button>
           <button class="pbtn grip" data-k="grip" data-v="Angled">Angled</button>
           <button class="pbtn grip" data-k="grip" data-v="Half">Half</button>
@@ -1245,14 +1281,14 @@ connectWs();
 
 function sendAll() {
   if (ws && ws.readyState===1) ws.send(JSON.stringify({
-    pull_down:              +$('sv').value  ||0,
-    horizontal:             +$('hv').value  ||0,
-    horizontal_delay_ms:    +$('dv').value  ||0,
-    horizontal_duration_ms: +$('uv').value  ||0,
-    vertical_delay_ms:      +$('vdv').value ||0,
-    vertical_duration_ms:   +$('vduv').value||0,
-    jitter_strength:        +$('js').value  ||0,
-    smooth_factor:          +$('ss').value  ||0,
+    pull_down:              +$('sv').value  || 0,
+    horizontal:             +$('hv').value  || 0,
+    horizontal_delay_ms:    +$('dv').value  || 0,
+    horizontal_duration_ms: +$('uv').value  || 0,
+    vertical_delay_ms:      +$('vdv').value || 0,
+    vertical_duration_ms:   +$('vduv').value|| 0,
+    jitter_strength:        +$('js').value  || 0,
+    smooth_factor:          +$('ss').value  || 0,
   }));
 }
 
@@ -1268,10 +1304,16 @@ sync($('vds'),$('vdv')); sync($('vdus'),$('vduv'));
 $('js').oninput=()=>{ $('jv').textContent=parseFloat($('js').value).toFixed(2); sendAll(); };
 $('ss').oninput=()=>{ $('sv2').textContent=parseFloat($('ss').value).toFixed(2); sendAll(); };
 
-// Rapid fire slider sync (no server send yet)
+// ── Rapid Fire slider sync ────────────────────────────────────────────────────
 const rfMs=$('rf-ms'), rfSl=$('rf-sl');
-rfSl.oninput=()=>{ rfMs.value=rfSl.value; };
-rfMs.oninput=()=>{ rfSl.value=Math.min(safeNum(rfMs.value), 500); };
+// FIX: ใช้ oninput แทน onchange เพื่อ sync ทันที
+rfSl.oninput = ()=>{ rfMs.value=rfSl.value; if(rfEnabled) pushRF(); };
+rfMs.oninput = ()=>{
+  const v = Math.max(30, Math.min(2000, safeNum(rfMs.value, 100)));
+  rfMs.value = v;
+  rfSl.value = Math.min(v, 500);
+  if(rfEnabled) pushRF();
+};
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 const TABS=['recoil','humanize','settings'];
@@ -1293,12 +1335,11 @@ function setConnDot(ok) {
   });
 }
 
-// ── Status ────────────────────────────────────────────────────────────────────
+// ── Toggle btn ────────────────────────────────────────────────────────────────
 function setBtn(on) {
   $('toggle-btn').textContent = on ? '■ ON' : '○ OFF';
   $('toggle-btn').className   = on ? 'enabled' : 'disabled';
 }
-
 $('toggle-btn').onclick = ()=>
   fetch('/toggle',{method:'POST'}).then(r=>r.json()).then(d=>setBtn(d.is_enabled));
 
@@ -1306,41 +1347,55 @@ $('tbs').onchange = ()=>
   fetch('/toggle-button',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({button:$('tbs').value})});
 
-// ── Rapid Fire pill ───────────────────────────────────────────────────────────
+// ── Rapid Fire ────────────────────────────────────────────────────────────────
 let rfEnabled = false;
-function syncRF() {
+
+function pushRF() {
+  // FIX: ส่ง interval_ms จาก field ปัจจุบันเสมอ ไม่ใช่ค่าเก่า
+  return fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ enabled: rfEnabled, interval_ms: safeNum(rfMs.value, 100) })
+  }).then(r=>r.json());
+}
+
+$('rf-pill').onclick = ()=>{
   rfEnabled = !rfEnabled;
   $('rf-pill').classList.toggle('on', rfEnabled);
   $('rf-lbl').textContent = rfEnabled ? 'ON' : 'OFF';
-  fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({enabled:rfEnabled, interval_ms:safeNum(rfMs.value,100)})
-  }).then(r=>r.json()).then(d=>{ if(d.rapid_fire_enabled) toast('⚡ Rapid Fire ON','var(--or)'); else toast('Rapid Fire OFF','var(--mu)'); });
-}
-$('rf-pill').onclick = syncRF;
-// Update interval on blur
-rfMs.addEventListener('change',()=>{
-  if(!rfEnabled) return;
-  fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({enabled:true, interval_ms:safeNum(rfMs.value,100)})});
-});
-
-// ── Hip Fire pill ─────────────────────────────────────────────────────────────
-let hfEnabled = false;
-function sendHF() {
-  fetch('/hip-fire',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({enabled:hfEnabled, pull_down:safeNum($('hf-pd').value), horizontal:safeNum($('hf-hz').value)})
+  pushRF().then(d=>{
+    if(d.rapid_fire_enabled) toast('⚡ Rapid Fire ON','var(--or)');
+    else toast('Rapid Fire OFF','var(--mu)');
   });
+};
+
+// ── Hip Fire ──────────────────────────────────────────────────────────────────
+let hfEnabled = false;
+
+function pushHF() {
+  // FIX: อ่านค่าจาก field ปัจจุบัน ไม่ใช่ค่าเก่าที่ cache ไว้
+  return fetch('/hip-fire',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      enabled:    hfEnabled,
+      pull_down:  safeNum($('hf-pd').value),
+      horizontal: safeNum($('hf-hz').value)
+    })
+  }).then(r=>r.json());
 }
+
 $('hf-pill').onclick = ()=>{
   hfEnabled = !hfEnabled;
   $('hf-pill').classList.toggle('on', hfEnabled);
   $('hf-lbl').textContent = hfEnabled ? 'ON' : 'OFF';
-  sendHF();
-  toast(hfEnabled ? '🎯 Hip Fire ON' : 'Hip Fire OFF', hfEnabled ? 'var(--vi)' : 'var(--mu)');
+  pushHF().then(()=>{
+    toast(hfEnabled ? '🎯 Hip Fire ON' : 'Hip Fire OFF', hfEnabled ? 'var(--vi)' : 'var(--mu)');
+  });
 };
-$('hf-pd').oninput = ()=>{ if(hfEnabled) sendHF(); };
-$('hf-hz').oninput = ()=>{ if(hfEnabled) sendHF(); };
 
+// FIX: ส่งค่า hip fire ทุกครั้งที่กรอก (ไม่ว่า pill จะ ON/OFF)
+// เพื่อให้ backend มีค่าล่าสุดเสมอ พร้อมใช้ทันทีที่กด ON
+$('hf-pd').oninput = ()=> pushHF();
+$('hf-hz').oninput = ()=> pushHF();
+
+// ── Status poll ───────────────────────────────────────────────────────────────
 function getStatus() {
   fetch('/status').then(r=>r.json()).then(d=>{
     setBtn(d.is_enabled);
@@ -1354,19 +1409,27 @@ function getStatus() {
     $('cph').style.display = d.has_horiz_curve ? 'inline-flex':'none';
     if(d.kmbox_ip && !$('km-ip').value){ $('km-ip').value=d.kmbox_ip; $('km-port').value=d.kmbox_port; }
     setConnDot(!!d.ctrl_connected);
-    // Rapid fire
-    if(d.rapid_fire_enabled!==undefined && d.rapid_fire_enabled!==rfEnabled){
-      rfEnabled=d.rapid_fire_enabled;
-      $('rf-pill').classList.toggle('on',rfEnabled); $('rf-lbl').textContent=rfEnabled?'ON':'OFF';
+
+    // Sync rapid fire state จาก backend
+    if(d.rapid_fire_enabled !== rfEnabled){
+      rfEnabled = d.rapid_fire_enabled;
+      $('rf-pill').classList.toggle('on', rfEnabled);
+      $('rf-lbl').textContent = rfEnabled ? 'ON' : 'OFF';
     }
-    if(d.rapid_fire_interval_ms) { rfMs.value=d.rapid_fire_interval_ms; rfSl.value=Math.min(d.rapid_fire_interval_ms,500); }
-    // Hip fire
-    if(d.hip_fire_enabled!==undefined && d.hip_fire_enabled!==hfEnabled){
-      hfEnabled=d.hip_fire_enabled;
-      $('hf-pill').classList.toggle('on',hfEnabled); $('hf-lbl').textContent=hfEnabled?'ON':'OFF';
+    if(d.rapid_fire_interval_ms){
+      rfMs.value = d.rapid_fire_interval_ms;
+      rfSl.value = Math.min(d.rapid_fire_interval_ms, 500);
     }
-    if(d.hip_pull_down  !==undefined) $('hf-pd').value=d.hip_pull_down;
-    if(d.hip_horizontal !==undefined) $('hf-hz').value=d.hip_horizontal;
+
+    // Sync hip fire state จาก backend
+    if(d.hip_fire_enabled !== hfEnabled){
+      hfEnabled = d.hip_fire_enabled;
+      $('hf-pill').classList.toggle('on', hfEnabled);
+      $('hf-lbl').textContent = hfEnabled ? 'ON' : 'OFF';
+    }
+    if(d.hip_pull_down  !== undefined) $('hf-pd').value = d.hip_pull_down;
+    if(d.hip_horizontal !== undefined) $('hf-hz').value = d.hip_horizontal;
+
   }).catch(()=>{});
 }
 getStatus();
@@ -1479,12 +1542,10 @@ function getCurve(){
 
 // ── Preset tag buttons ────────────────────────────────────────────────────────
 let currentTags = {};
-
 document.querySelectorAll('.pbtn').forEach(btn=>{
   btn.addEventListener('click',()=>{
     const k=btn.dataset.k, v=btn.dataset.v;
     currentTags[k]=v;
-    // Highlight active in same group
     btn.closest('.preset-row').querySelectorAll('.pbtn').forEach(b=>{
       b.style.opacity = (b.dataset.v===v) ? '1' : '0.45';
       b.style.borderWidth = (b.dataset.v===v) ? '2px' : '1px';
@@ -1501,7 +1562,6 @@ function renderTagChips(){
     chip.innerHTML=`<span style="color:var(--bl)">${k}:</span><span>${v}</span><span class="rm" data-k="${k}">×</span>`;
     chip.querySelector('.rm').onclick=e=>{
       delete currentTags[e.target.dataset.k];
-      // Reset that preset group highlight
       document.querySelectorAll(`.pbtn[data-k="${e.target.dataset.k}"]`).forEach(b=>{ b.style.opacity='1'; b.style.borderWidth='1px'; });
       renderTagChips(); updSavePreview();
     };
@@ -1586,43 +1646,68 @@ function updBrowseLbl(){
   lbl.innerHTML='Selected — <span style="color:var(--ac);font-family:var(--mo)">'+name+'</span>';
 }
 
-$('cfgdd').onchange=()=>{
-  const key=$('cfgdd').value;updBrowseLbl();if(!key)return;
-  const cfg=cache[key];if(cfg==null)return;
-  const pd=typeof cfg==='object'?(cfg.pull_down??0):(cfg??0);
-  const hz=typeof cfg==='object'?(cfg.horizontal??0):0;
-  const dl=typeof cfg==='object'?(cfg.horizontal_delay_ms??500):500;
-  const du=typeof cfg==='object'?(cfg.horizontal_duration_ms??2000):2000;
-  const vdl=typeof cfg==='object'?(cfg.vertical_delay_ms??0):0;
-  const vdu=typeof cfg==='object'?(cfg.vertical_duration_ms??0):0;
-  $('sv').value=pd;$('sl').value=Math.round(pd);
-  $('hv').value=hz;$('hs').value=Math.round(hz);
-  $('dv').value=dl;$('ds').value=dl;
-  $('uv').value=du;$('us').value=du;
-  $('vdv').value=vdl;$('vds').value=vdl;
+// ══════════════════════════════════════════════════════════════════════════════
+//  FIX: cfgdd.onchange — โหลด config ปืนแล้ว sync ค่าทั้งหมดไป backend
+//  รวมถึง hip fire ซึ่ง v5.0/v5.1 ไม่ได้ส่ง
+// ══════════════════════════════════════════════════════════════════════════════
+$('cfgdd').onchange = ()=>{
+  const key=$('cfgdd').value; updBrowseLbl(); if(!key) return;
+  const cfg=cache[key]; if(cfg==null) return;
+
+  // ── โหลดค่า recoil ──────────────────────────────────────────────────────────
+  const pd  = typeof cfg==='object' ? (cfg.pull_down  ?? 0) : (cfg ?? 0);
+  const hz  = typeof cfg==='object' ? (cfg.horizontal ?? 0) : 0;
+  const dl  = typeof cfg==='object' ? (cfg.horizontal_delay_ms    ?? 500)  : 500;
+  const du  = typeof cfg==='object' ? (cfg.horizontal_duration_ms ?? 2000) : 2000;
+  const vdl = typeof cfg==='object' ? (cfg.vertical_delay_ms      ?? 0)    : 0;
+  const vdu = typeof cfg==='object' ? (cfg.vertical_duration_ms   ?? 0)    : 0;
+
+  $('sv').value=pd;   $('sl').value=Math.round(pd);
+  $('hv').value=hz;   $('hs').value=Math.round(hz);
+  $('dv').value=dl;   $('ds').value=dl;
+  $('uv').value=du;   $('us').value=du;
+  $('vdv').value=vdl; $('vds').value=vdl;
   $('vduv').value=vdu;$('vdus').value=vdu;
-  // Hip fire from saved config
-  if(cfg.hip_pull_down!==undefined) $('hf-pd').value=cfg.hip_pull_down;
-  if(cfg.hip_horizontal!==undefined) $('hf-hz').value=cfg.hip_horizontal;
-  const hasCurve=typeof cfg==='object'&&cfg.pull_down_curve;
-  $('cpv').style.display=hasCurve?'inline-flex':'none';
-  restoreCurve(hasCurve?cfg.pull_down_curve:null);
+
+  // ── FIX: โหลดค่า hip fire จาก config ────────────────────────────────────────
+  // ใช้ค่าจาก config ถ้ามี ไม่มีให้ใช้ค่าที่ field แสดงอยู่ (คงค่าเดิม)
+  const newHfPd = (cfg.hip_pull_down  !== undefined) ? cfg.hip_pull_down  : safeNum($('hf-pd').value);
+  const newHfHz = (cfg.hip_horizontal !== undefined) ? cfg.hip_horizontal : safeNum($('hf-hz').value);
+  $('hf-pd').value = newHfPd;
+  $('hf-hz').value = newHfHz;
+
+  // FIX: ส่งค่า hip fire ใหม่ไป backend เสมอ (ทั้ง ON และ OFF)
+  // เพราะ backend ต้องมีค่าล่าสุด พร้อมใช้งานทันทีเมื่อกด ON
+  fetch('/hip-fire',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({ enabled: hfEnabled, pull_down: newHfPd, horizontal: newHfHz })
+  });
+
+  // ── โหลด curve ───────────────────────────────────────────────────────────────
+  const hasCurve = typeof cfg==='object' && cfg.pull_down_curve;
+  $('cpv').style.display = hasCurve ? 'inline-flex' : 'none';
+  restoreCurve(hasCurve ? cfg.pull_down_curve : null);
+
+  // ── ส่งค่า recoil ผ่าน WS ───────────────────────────────────────────────────
   sendAll();
-  if(ws&&ws.readyState===1) ws.send(JSON.stringify({pull_down_curve:hasCurve?cfg.pull_down_curve:[]}));
-  const name=typeof cfg==='object'?(cfg.name||key):key;
-  $('cfg-name').value=name;
-  currentTags=typeof cfg==='object'&&cfg.tags?{...cfg.tags}:{};
-  // Update preset button highlights
+  if(ws && ws.readyState===1)
+    ws.send(JSON.stringify({ pull_down_curve: hasCurve ? cfg.pull_down_curve : [] }));
+
+  // ── โหลด metadata ────────────────────────────────────────────────────────────
+  const name = typeof cfg==='object' ? (cfg.name || key) : key;
+  $('cfg-name').value = name;
+  currentTags = typeof cfg==='object' && cfg.tags ? {...cfg.tags} : {};
+
+  // reset preset button highlights
   document.querySelectorAll('.pbtn').forEach(b=>{ b.style.opacity='1'; b.style.borderWidth='1px'; });
   Object.entries(currentTags).forEach(([k,v])=>{
     document.querySelectorAll(`.pbtn[data-k="${k}"][data-v="${v}"]`).forEach(b=>{ b.style.opacity='1'; b.style.borderWidth='2px'; });
     document.querySelectorAll(`.pbtn[data-k="${k}"]:not([data-v="${v}"])`).forEach(b=>{ b.style.opacity='0.45'; });
   });
-  renderTagChips();updSavePreview();
+  renderTagChips(); updSavePreview();
   toast('✓ Loaded: '+name);
 };
 
-$('search').oninput=filterBrowse;
+$('search').oninput = filterBrowse;
 
 function showWarn(msg){ $('warn-txt').textContent=msg; $('warn').classList.add('show'); setTimeout(()=>$('warn').classList.remove('show'),3000); }
 
@@ -1630,7 +1715,7 @@ function buildPayload(name){
   const c=getCurve();
   return{
     name,
-    tags:Object.keys(currentTags).length>0?currentTags:null,
+    tags: Object.keys(currentTags).length>0 ? currentTags : null,
     pull_down_value:        safeNum($('sv').value),
     vertical_delay_ms:      safeNum($('vdv').value),
     vertical_duration_ms:   safeNum($('vduv').value),
@@ -1639,14 +1724,15 @@ function buildPayload(name){
     horizontal_duration_ms: safeNum($('uv').value),
     hip_pull_down:          safeNum($('hf-pd').value),
     hip_horizontal:         safeNum($('hf-hz').value),
-    ...(c?{pull_down_curve:c}:{})
+    ...(c ? {pull_down_curve:c} : {})
   };
 }
 
 $('save-btn').onclick=()=>{
-  const name=$('cfg-name').value.trim();if(!name){showWarn('กรอกชื่อก่อน');return;}
+  const name=$('cfg-name').value.trim(); if(!name){showWarn('กรอกชื่อก่อน');return;}
   fetch('/configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload(name))})
-    .then(r=>r.json()).then(d=>{ if(d.detail)showWarn(d.detail); else{fetchConfigs();toast('✓ Saved: '+name);} }).catch(()=>showWarn('บันทึกไม่สำเร็จ'));
+    .then(r=>r.json()).then(d=>{ if(d.detail)showWarn(d.detail); else{fetchConfigs();toast('✓ Saved: '+name);} })
+    .catch(()=>showWarn('บันทึกไม่สำเร็จ'));
 };
 $('overwrite-btn').onclick=()=>{
   const key=$('cfgdd').value,name=$('cfg-name').value.trim()||key;
@@ -1663,7 +1749,7 @@ $('overwrite-btn').onclick=()=>{
     }).catch(()=>showWarn('Overwrite ไม่สำเร็จ'));
 };
 $('delete-btn').onclick=()=>{
-  const key=$('cfgdd').value;if(!key){showWarn('เลือก config ที่ต้องการลบก่อน');return;}
+  const key=$('cfgdd').value; if(!key){showWarn('เลือก config ที่ต้องการลบก่อน');return;}
   if(!confirm('ลบ "'+key+'"?'))return;
   fetch('/configs/'+encodeURIComponent(key),{method:'DELETE'})
     .then(()=>{fetchConfigs();toast('Deleted: '+key,'var(--rd)');}).catch(()=>{});
@@ -1672,7 +1758,7 @@ $('delete-btn').onclick=()=>{
 // ── Profile management ────────────────────────────────────────────────────────
 function fetchCfgFiles(){
   fetch('/config-files').then(r=>r.json()).then(d=>{
-    const dd=$('cfgfd');dd.innerHTML='';
+    const dd=$('cfgfd'); dd.innerHTML='';
     d.files.forEach(f=>{ const o=document.createElement('option');o.value=f;o.textContent=f.replace('.json','');dd.appendChild(o); });
     dd.value=d.current;
     $('cfg-badge').textContent=d.current.replace('.json','');
@@ -1682,25 +1768,25 @@ $('cfgfd').onchange=()=>{
   fetch('/config-files/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:$('cfgfd').value})})
     .then(r=>r.json()).then(d=>{
       $('cfg-badge').textContent=d.current_config_file.replace('.json','');
-      cache=d.guns;allKeys=Object.keys(d.guns);
-      buildTagFilters();filterBrowse();
+      cache=d.guns; allKeys=Object.keys(d.guns);
+      buildTagFilters(); filterBrowse();
       toast('Profile: '+d.current_config_file.replace('.json',''));
     }).catch(()=>{});
 };
 $('create-cfg').onclick=()=>{
-  const n=$('new-cfg-name').value.trim();if(!n)return;
+  const n=$('new-cfg-name').value.trim(); if(!n) return;
   fetch('/config-files',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({filename:n})})
     .then(r=>r.json()).then(()=>{fetchCfgFiles();$('new-cfg-name').value='';toast('✓ Profile created: '+n);}).catch(()=>{});
 };
 $('delete-cfg').onclick=()=>{
-  const f=$('cfgfd').value;if(!f||f==='default.json')return;
+  const f=$('cfgfd').value; if(!f||f==='default.json') return;
   if(confirm('ลบ profile "'+f+'"?'))
     fetch('/config-files/'+encodeURIComponent(f),{method:'DELETE'})
       .then(()=>{fetchCfgFiles();toast('Profile deleted','var(--rd)');}).catch(()=>{});
 };
 
 // Init
-fetchConfigs();fetchCfgFiles();updSavePreview();
+fetchConfigs(); fetchCfgFiles(); updSavePreview();
 });
 </script>
 </body>
@@ -1725,7 +1811,7 @@ def get_local_ip():
 
 if __name__ == "__main__":
     ip = get_local_ip()
-    print(f"\n  ┌─ RVN v5.0 ─────────────────────────────────────────┐")
+    print(f"\n  ┌─ RVN v5.2 ─────────────────────────────────────────┐")
     print(f"  │  Local  : http://localhost:8000                    │")
     print(f"  │  Network: http://{ip}:8000        │")
     print(f"  └────────────────────────────────────────────────────┘\n")
