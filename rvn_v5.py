@@ -21,7 +21,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
-import json, os, socket, time, struct, random
+import json, os, socket, time, random
 from contextlib import asynccontextmanager
 
 # ── Optional platform libs ────────────────────────────────────────────────────
@@ -136,123 +136,91 @@ class SoftwareController:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  KMBoxController
+#  KMBoxController  — ใช้ kmNet library (เหมือน ignEvade colorbot)
+#  pip install kmNet
 # ══════════════════════════════════════════════════════════════════════════════
+try:
+    import kmNet as _kmNet
+    _HAS_KMNET = True
+except ImportError:
+    _HAS_KMNET = False
+    _kmNet = None
+
 class KMBoxController:
-    CMD_MOVE    = 0x0001
-    CMD_CLICK   = 0x0003
-    CMD_MONITOR = 0x0100
-    CMD_CONNECT = 0x000E
-    _BTN = {"LMB": 1, "RMB": 2, "MMB": 4, "M4": 8, "M5": 16}
+    # mask สำหรับ kmNet.isdown() — ตรงกับ KMBox button bitmask
+    _BTN_MASK = {"LMB": 1, "RMB": 2, "MMB": 4, "M4": 8, "M5": 16}
 
     def __init__(self):
-        self._sock   = None
-        self._connected = False
-        self._mac    = b'\x00\x00\x00\x00'
-        self._rand   = 0
-        self._seq    = 0
-        self._lock   = threading.Lock()
-        self._btn_cache: dict = {}
-        self._monitor_thread: threading.Thread | None = None
+        self._connected   = False
+        self._lock        = threading.Lock()
+        self._btn_cache: dict = {k: False for k in self._BTN_MASK}
+        self._poll_thread: threading.Thread | None = None
 
     def is_connected(self): return self._connected
 
     def connect(self):
+        if not _HAS_KMNET:
+            print("[KMBox] kmNet library ไม่ได้ติดตั้ง — รัน: pip install kmNet")
+            return False
         cfg  = app_state.get_kmbox_config()
-        ip, port = cfg["ip"], int(cfg["port"]) if cfg["port"] else 8808
-        uuid = cfg["uuid"].replace("-","").replace(" ","")
+        ip   = cfg["ip"].strip()
+        port = str(cfg["port"]) if cfg["port"] else "8808"
+        uuid = cfg["uuid"].replace("-", "").replace(" ", "").upper()
         if len(uuid) < 8:
-            print("[KMBox] UUID not filled in — requires 4 bytes hex, e.g., 4BD95C53")
-            self._connected = False
+            print("[KMBox] UUID ไม่ถูกต้อง — ต้องการ 8 hex chars เช่น 4BD95C53")
             return False
         try:
-            self._mac = bytes.fromhex(uuid[:8])
-        except ValueError:
-            print(f"[KMBox] UUID incorrect: {uuid!r}")
-            self._connected = False
-            return False
-        try:
-            if self._sock:
-                try: self._sock.close()
-                except: pass
-            self._rand = random.randint(1, 0xFFFFFFFF)
-            self._seq  = 0
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(2.0)
-            self._sock = sock
-            # cache ip+port ณ เวลา connect — ไม่ดึง config ใหม่ทุก packet
-            self._ip   = ip
-            self._port = port
-            sock.sendto(self._build(self.CMD_CONNECT, b'\x00'*4), (ip, port))
-            resp, _ = sock.recvfrom(1024)
-            if len(resp) >= 16:
-                self._connected = True
-                sock.settimeout(0.05)
-                self.StartButtonListener()
-                print(f"[KMBox] Connected {ip}:{port} (UUID={uuid[:8]})")
-                return True
-            raise Exception(f"Bad handshake ({len(resp)} bytes)")
-        except socket.timeout:
-            print(f"[KMBox] Timeout — ตรวจสอบ IP ({ip}) และ Port ({port})")
-            self._connected = False
-            return False
+            # kmNet.init(ip, port, uuid) — เหมือน ignEvade ใช้
+            _kmNet.init(ip, port, uuid[:8])
+            self._connected = True
+            print(f"[KMBox/kmNet] Connected → {ip}:{port} uuid={uuid[:8]}")
+            self.StartButtonListener()
+            return True
         except Exception as e:
-            print(f"[KMBox] Failed: {e}")
+            print(f"[KMBox/kmNet] init error: {e}")
             self._connected = False
             return False
 
     def disconnect(self):
         self._connected = False
-        with self._lock:
-            if self._sock:
-                try: self._sock.close()
-                except: pass
-                self._sock = None
+        # kmNet ไม่มี explicit disconnect — set flag เพื่อหยุด poll thread
 
     def StartButtonListener(self):
-        if self._monitor_thread and self._monitor_thread.is_alive(): return
+        if self._poll_thread and self._poll_thread.is_alive(): return
         def _poll():
             while self._connected:
-                for btn, mask in self._BTN.items():
+                try:
+                    # kmNet.isdown(mask) คืน 1 ถ้ากดอยู่
+                    state_raw = _kmNet.isdown(0)  # 0 = รวมทุก button
                     with self._lock:
-                        try:
-                            if self._sock is None: break
-                            self._sock.sendto(self._build(self.CMD_MONITOR, struct.pack('<I', mask)), self._addr())
-                            resp, _ = self._sock.recvfrom(1024)
-                            state = bool(struct.unpack_from('<I', resp, 16)[0] & mask) if len(resp) >= 20 else False
-                            self._btn_cache[btn] = state
-                        except socket.timeout: self._btn_cache[btn] = False
-                        except: self._connected = False; break
-                time.sleep(0.01)
-        self._monitor_thread = threading.Thread(target=_poll, daemon=True)
-        self._monitor_thread.start()
+                        for btn, mask in self._BTN_MASK.items():
+                            self._btn_cache[btn] = bool(state_raw & mask)
+                except Exception:
+                    pass
+                time.sleep(0.005)
+        self._poll_thread = threading.Thread(target=_poll, daemon=True)
+        self._poll_thread.start()
 
-    def get_button_state(self, btn): return self._btn_cache.get(btn, False)
+    def get_button_state(self, btn):
+        with self._lock: return self._btn_cache.get(btn, False)
 
     def simple_move_mouse(self, x, y):
-        if not self._connected: return
-        with self._lock:
-            try:
-                self._sock.sendto(self._build(self.CMD_MOVE, struct.pack('<hhhB', x, y, 0, 0)), self._addr())
-            except: self._connected = False
+        if not self._connected or (x == 0 and y == 0): return
+        try:
+            _kmNet.move(x, y)
+        except Exception as e:
+            print(f"[KMBox/kmNet] move error: {e}")
+            self._connected = False
 
     def click_lmb(self):
         if not self._connected: return
-        with self._lock:
-            try:
-                self._sock.sendto(self._build(self.CMD_CLICK, struct.pack('<BB', 1, 1)), self._addr())
-                time.sleep(0.01)
-                self._sock.sendto(self._build(self.CMD_CLICK, struct.pack('<BB', 1, 0)), self._addr())
-            except: self._connected = False
-
-    def _build(self, cmd, payload):
-        self._seq += 1
-        return (self._mac + struct.pack('<III', self._rand, self._seq, cmd)
-                + payload + b'\x00' * max(0, 48 - len(payload)))
-
-    def _addr(self):
-        # ใช้ cached ip/port ที่ set ตอน connect() — ไม่ดึง config ทุก packet
-        return (getattr(self, '_ip', ''), getattr(self, '_port', 8808))
+        try:
+            _kmNet.left(1)   # กด
+            time.sleep(0.01)
+            _kmNet.left(0)   # ปล่อย
+        except Exception as e:
+            print(f"[KMBox/kmNet] click error: {e}")
+            self._connected = False
 
 
 software_controller = SoftwareController()
@@ -347,7 +315,7 @@ class ConfigFileRequest(BaseModel):     filename: str
 
 class KMBoxConfigRequest(BaseModel):
     ip:   str = Field(..., min_length=7, max_length=64)
-    port: int = Field(default=1408, ge=1, le=65535)
+    port: int = Field(default=8808, ge=1, le=65535)
     uuid: str = Field(default="")
 
 class HumanizeConfig(BaseModel):
@@ -508,6 +476,7 @@ class AppState:
                 "has_pull_curve":         self.pull_down_curve is not None,
                 "has_horiz_curve":        self.horizontal_curve is not None,
                 "ctrl_connected":         ctrl.is_connected(),
+                "kmnet_installed":        _HAS_KMNET,
                 "rapid_fire_enabled":     rf_en,
                 "rapid_fire_interval_ms": rf_ms,
                 "hip_fire_enabled":       hf_en,
@@ -760,7 +729,7 @@ async def set_trigger_mode(c: TriggerModeConfig):
 async def set_controller_type(c: ControllerTypeConfig):
     r = app_state.set_controller_type(c.controller)
     if r is None: raise HTTPException(400, f"Must be one of {VALID_CONTROLLERS}")
-    return {"controller_type": r}
+    return {"controller_type": r, "kmnet_installed": _HAS_KMNET}
 
 @app.get("/kmbox-config")
 async def get_kmbox():
@@ -779,12 +748,14 @@ async def kmbox_connect():
     kmbox_controller.disconnect()
     cfg = app_state.get_kmbox_config()
     uuid = cfg["uuid"].replace("-","").replace(" ","")
+    if not _HAS_KMNET:
+        return {"connected": False, "message": "kmNet ไม่ได้ติดตั้ง — รัน: pip install kmNet"}
     if len(uuid) < 8:
         return {"connected": False, "message": "UUID ไม่ได้กรอก — ต้องการ 8 hex chars เช่น 4BD95C53"}
     ok = kmbox_controller.connect()
     if ok:
         return {"connected": True, "message": f"เชื่อมต่อสำเร็จ {cfg['ip']}:{cfg['port']}"}
-    return {"connected": False, "message": f"เชื่อมต่อไม่ได้ — ตรวจสอบ IP/Port/UUID ใน KMBox Client"}
+    return {"connected": False, "message": "เชื่อมต่อไม่ได้ — ตรวจสอบ IP/Port/UUID"}
 
 @app.get("/config-files")
 async def get_config_files():
@@ -1161,7 +1132,11 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
     </div>
 
     <div class="card" id="kmbox-card" style="display:none">
-      <div class="clabel">KMBox Connection</div>
+      <div class="clabel">KMBox — kmNet</div>
+      <div id="kmnet-warn" class="sw-notice" style="display:none;color:var(--rd);border-color:#3a1020;background:#0f0408;margin-bottom:10px;">
+        ⚠ kmNet ไม่ได้ติดตั้ง<br>
+        <span style="color:var(--mu);">รันคำสั่ง: <span style="color:var(--yl);font-family:var(--mo)">pip install kmNet</span></span>
+      </div>
       <label style="font-size:.64rem;color:var(--mu);display:block;margin-bottom:5px;text-transform:uppercase;">IP Address</label>
       <input type="text" id="km-ip" placeholder="192.168.2.188" style="margin-bottom:8px;">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:9px;">
@@ -1179,7 +1154,11 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
         <button class="btn btn-g" id="km-conn" style="flex:1">เชื่อมต่อ</button>
       </div>
       <div id="km-msg" style="margin-top:7px;font-size:.7rem;color:var(--mu);min-height:1.2em;font-family:var(--mo)"></div>
-      <div class="hint" style="margin-top:8px;line-height:1.7">UUID หาได้จาก KMBox Client → Device Info<br>Port: KMBox Net = <span style="color:var(--ac);font-family:var(--mo)">8808</span> · KMBox Pro = <span style="color:var(--ac);font-family:var(--mo)">8808</span></div>
+      <div class="hint" style="margin-top:8px;line-height:1.9">
+        UUID หาได้จาก <strong>KMBox Client → Device Info</strong><br>
+        Port ปกติ: <span style="color:var(--ac);font-family:var(--mo)">8808</span><br>
+        Library: <span style="color:var(--yl);font-family:var(--mo)">pip install kmNet</span>
+      </div>
     </div>
 
     <div class="card" id="sw-card" style="display:none">
@@ -1436,7 +1415,7 @@ function getStatus() {
     setBtn(d.is_enabled);
     if(d.toggle_button) $('tbs').value=d.toggle_button;
     if(d.trigger_mode)  $('trig').value=d.trigger_mode;
-    if(d.controller_type){ $('ctrl').value=d.controller_type; ctrlUI(d.controller_type,d.ctrl_connected); }
+    if(d.controller_type){ $('ctrl').value=d.controller_type; ctrlUI(d.controller_type,d.ctrl_connected,d.kmnet_installed); }
     if(d.current_config_file) $('cfg-badge').textContent=d.current_config_file.replace('.json','');
     if(d.jitter_strength!==undefined){ $('js').value=d.jitter_strength; $('jv').textContent=(+d.jitter_strength).toFixed(2); }
     if(d.smooth_factor  !==undefined){ $('ss').value=d.smooth_factor;   $('sv2').textContent=(+d.smooth_factor).toFixed(2); }
@@ -1486,21 +1465,25 @@ getStatus();
 setInterval(getStatus, 1000);
 
 // ── Controller ────────────────────────────────────────────────────────────────
-function ctrlUI(ct, connected) {
+function ctrlUI(ct, connected, kmnetInstalled) {
   $('kmbox-card').style.display = ct==='kmbox'    ? 'block':'none';
   $('sw-card').style.display    = ct==='software' ? 'block':'none';
-  const M={makcu:['mk','MAKCU 2-PC'],kmbox:['km','KMBox 2-PC'],software:['sw','Software 1-PC']};
+  const M={makcu:['mk','MAKCU 2-PC'],kmbox:['km','KMBox / kmNet'],software:['sw','Software 1-PC']};
   const [cls,txt]=M[ct]||['mk','—'];
   $('cbw').innerHTML=`<span class="cbadge ${cls}">${txt}</span>`;
   if(ct==='software'){
     $('sw-status').textContent=connected?'✓ Ready — SendInput active':'✗ Not Ready (Windows only)';
     $('sw-status').style.color=connected?'var(--ac)':'var(--rd)';
   }
+  if(ct==='kmbox' && kmnetInstalled!==undefined){
+    $('kmnet-warn').style.display = kmnetInstalled ? 'none' : 'block';
+  }
 }
 $('ctrl').onchange=()=>{
   const ct=$('ctrl').value;
   fetch('/controller-type',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({controller:ct})})
-    .then(()=>ctrlUI(ct,false));
+    .then(r=>r.json()).then(d=>ctrlUI(ct, false, d.kmnet_installed ?? undefined))
+    .catch(()=>ctrlUI(ct,false));
 };
 $('trig').onchange=()=>
   fetch('/trigger-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:$('trig').value})});
