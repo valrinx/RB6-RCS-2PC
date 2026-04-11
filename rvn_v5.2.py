@@ -1670,7 +1670,8 @@ function filterBrowse(){
     const tagStr=Object.entries(tags).map(([k,v])=>`[${k}:${v}]`).join(' ');
     const o=document.createElement('option');
     o.value=key;
-    o.textContent=name+(tagStr?' '+tagStr:'')+`  ↓${pd}`;
+    o.textContent=name+`  ↓${pd}`;
+    if(tagStr) o.title=tagStr;
     $('cfgdd').appendChild(o);
   }
   $('cfgdd').value=prev;
@@ -1680,8 +1681,11 @@ function filterBrowse(){
 function updBrowseLbl(){
   const key=$('cfgdd').value,lbl=$('browse-lbl');
   if(!key){lbl.textContent='Browse Configs';return;}
-  const cfg=cache[key];const name=typeof cfg==='object'?(cfg.name||key):key;
-  lbl.innerHTML='Selected — <span style="color:var(--ac);font-family:var(--mo)">'+name+'</span>';
+  const cfg=cache[key];
+  const name=typeof cfg==='object'?(cfg.name||key):key;
+  const tags=typeof cfg==='object'?(cfg.tags||{}):{}
+  const tagStr=Object.entries(tags).map(([k,v])=>`<span style="color:var(--mu);font-size:.6rem">[${k}:${v}]</span>`).join(' ');
+  lbl.innerHTML='Selected — <span style="color:var(--ac);font-family:var(--mo)">'+name+'</span>'+(tagStr?' '+tagStr:'');
 }
 
 $('cfgdd').onchange=()=>{
