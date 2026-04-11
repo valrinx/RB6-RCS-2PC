@@ -1,11 +1,18 @@
 """
-RVN — Recoil Control System  v5.1
-Bug fixes from v5.0:
-  • FIX: Rapid Fire interval ไม่ล็อคที่ 100 — ส่งค่า interval_ms ทุกครั้งที่กด pill + เปลี่ยน 'change' → 'input'
-  • FIX: Hip Fire ส่งค่า pull_down/horizontal เสมอ แม้ pill ยังปิดอยู่
-  • FIX: Hip Fire + Trigger mode LMB+RMB conflict — hip fire ทำงานได้แม้ mode เป็น LMB+RMB
-  • FIX: Rapid Fire ไม่ reset hold_start — แก้ให้ RCS loop ไม่นับ hold time ต่อเนื่องจาก auto-click
-  • FIX: WebSocket ขาด horizontal_curve handler — เพิ่ม set_curves สำหรับ horizontal_curve ด้วย
+RVN — Recoil Control System  v5.2
+Bug fixes from v5.1:
+  • FIX BUG 1: Rapid Fire ทำงานถูกต้องสำหรับปืน semi —
+    กด LMB ค้าง → spam click_lmb() ด้วย interval ที่ตั้ง
+    ข้าม RCS (pull down) ทั้งหมดเมื่อ RF เปิด เพราะปืน semi ยิงทีละนัด
+    ไม่มี recoil ต่อเนื่อง
+    ใช้ raw_lmb โดยตรง — GetAsyncKeyState/MAKCU callback อ่าน physical
+    hardware ไม่ได้รับผลกระทบจาก click_lmb() synthetic ของตัวเอง
+  • FIX BUG 2a: Browse config โหลดปืนแล้ว RCS/Rapid ไม่ทำงาน — cfgdd.onchange
+    ไม่ได้เรียก sendHF() หลัง set hip fire values → server ยังมีค่า hip=0
+  • FIX BUG 2b: cfgdd.onchange เรียก sendAll() ก่อน DOM update เสร็จ
+    แก้: ใช้ setTimeout(0) ให้ JS event loop commit ค่า input ก่อน
+  • FIX BUG 2c: getStatus() overwrite hf-pd/hf-hz ทุก 1 วินาทีด้วยค่าเก่าจาก
+    server — แก้: suppress overwrite 3 วินาทีหลัง load config (_lastConfigLoad)
 """
 
 import threading
@@ -531,14 +538,14 @@ async def lifespan(app):
 
 
 def mouse_control_loop():
-    toggle_was = False
-    hold_start = None
-    curve_tick = 0
-    smoother   = _Smoother()
+    toggle_was    = False
+    hold_start    = None
+    curve_tick    = 0
+    smoother      = _Smoother()
     _listener_started = {"makcu": False, "kmbox": False, "software": False}
 
     # Rapid fire state
-    last_rf_click = 0.0
+    last_rf_click  = 0.0
 
     while True:
         t0 = time.perf_counter()
@@ -567,8 +574,31 @@ def mouse_control_loop():
                 hold_start = None
             toggle_was = pressed
 
-            lmb = ctrl.get_button_state("LMB")
-            rmb = ctrl.get_button_state("RMB")
+            raw_lmb = ctrl.get_button_state("LMB")
+            rmb     = ctrl.get_button_state("RMB")
+
+            rf_en, rf_ms = app_state.get_rapid_fire()
+
+            # ── Rapid Fire — กด LMB ค้าง → spam click อัตโนมัติ ──────────────
+            # ใช้ raw_lmb โดยตรง — GetAsyncKeyState/KMBox monitor/MAKCU callback
+            # อ่าน physical hardware ไม่ได้รับผลกระทบจาก click_lmb() synthetic
+            if rf_en and app_state.get_enabled() and raw_lmb:
+                now = time.perf_counter()
+                if (now - last_rf_click) * 1000 >= rf_ms:
+                    ctrl.click_lmb()
+                    last_rf_click = now
+                # RF เปิด → ข้าม RCS ทั้งหมด (ปืน semi ไม่มี recoil ต่อเนื่อง)
+                hold_start = None
+                curve_tick = 0
+                smoother.reset()
+                # ข้ามไป timing wait แทน continue เพื่อให้ elapsed คำนวณถูก
+                elapsed = time.perf_counter() - t0
+                coarse = TICK_S - elapsed - 0.001
+                if coarse > 0: time.sleep(coarse)
+                while (time.perf_counter() - t0) < TICK_S: pass
+                continue
+
+            lmb = raw_lmb
 
             # ── Hip Fire detection ────────────────────────────────────────────
             hf_en, hf_pd, hf_hz = app_state.get_hip_fire()
@@ -580,20 +610,6 @@ def mouse_control_loop():
                 fire = lmb
             else:
                 fire = (lmb and rmb) if trigger_mode == "LMB+RMB" else lmb
-
-            # ── Rapid Fire ────────────────────────────────────────────────────
-            # ROOT CAUSE FIX: ไม่ reset hold_start เมื่อ rapid fire click
-            # เพราะ click_lmb() ส่ง LMB down+up ทำให้ lmb state = False ชั่วคราว
-            # → fire = False → else branch reset hold_start = None
-            # → RCS ทำงานแค่นัดแรกแล้วหยุด
-            # แก้: RF และ RCS ทำงานแยกกัน RF ใช้ fire state จาก physical button
-            # ไม่ยุ่งกับ hold_start เลย
-            rf_en, rf_ms = app_state.get_rapid_fire()
-            if rf_en and app_state.get_enabled() and fire:
-                now = time.perf_counter()
-                if (now - last_rf_click) * 1000 >= rf_ms:
-                    ctrl.click_lmb()
-                    last_rf_click = now
 
             if app_state.get_enabled() and fire:
                 now = time.perf_counter()
@@ -613,16 +629,24 @@ def mouse_control_loop():
                     v_delay  = app_state.get_vertical_delay()
                     v_dur    = app_state.get_vertical_duration()
                     v_active = (hold_ms >= v_delay) and (v_dur == 0 or hold_ms <= v_delay + v_dur)
-                    raw_y = (
-                        (pd_curve[min(curve_tick, len(pd_curve)-1)] / 5.0 if pd_curve else app_state.get_active_value() / 5.0)
-                        if v_active else 0.0
-                    )
+                    if v_active:
+                        # FIX: curve หมด → fall back ค่าคงที่ (เดิม min() ติดค่าสุดท้าย = ปืนดีดขึ้น)
+                        if pd_curve and curve_tick < len(pd_curve):
+                            raw_y = pd_curve[curve_tick] / 5.0
+                        else:
+                            raw_y = app_state.get_active_value() / 5.0
+                    else:
+                        raw_y = 0.0
                     # Horizontal
                     h_delay = app_state.get_horizontal_delay()
                     h_dur   = app_state.get_horizontal_duration()
                     raw_x   = 0.0
                     if hold_ms >= h_delay and (h_dur == 0 or hold_ms <= h_delay + h_dur):
-                        raw_x = hz_curve[min(curve_tick, len(hz_curve)-1)] / 5.0 if hz_curve else app_state.get_horizontal_value() / 5.0
+                        # FIX: curve หมด → fall back ค่าคงที่
+                        if hz_curve and curve_tick < len(hz_curve):
+                            raw_x = hz_curve[curve_tick] / 5.0
+                        else:
+                            raw_x = app_state.get_horizontal_value() / 5.0
 
                 curve_tick += 1
                 mx, my = humanize(raw_x, raw_y, app_state.get_jitter(), smoother, app_state.get_smooth())
@@ -1063,7 +1087,8 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div class="ceditor">
         <canvas id="curve-canvas" height="120"></canvas>
         <div class="cacts">
-          <button class="btn btn-s" id="curve-load-btn" style="font-size:.6rem;padding:5px 9px">From Value</button>
+          <button class="btn btn-s" id="curve-load-btn" style="font-size:.6rem;padding:5px 9px">Decay</button>
+          <button class="btn btn-s" id="curve-flat-btn" style="font-size:.6rem;padding:5px 9px;border-color:#1a3a50;color:#60c8f0;">Flat</button>
           <button class="btn btn-g" id="curve-apply-btn" style="font-size:.6rem;padding:5px 9px">Apply</button>
           <button class="btn btn-d" id="curve-clear-btn" style="font-size:.6rem;padding:5px 9px">Clear</button>
           <span id="curve-pts" style="font-size:.6rem;color:var(--mu);margin-left:auto;font-family:var(--mo)">0 pts</span>
@@ -1376,6 +1401,7 @@ $('hf-hz').oninput = sendHF;
 // และ sync ค่า pull_down/horizontal กลับมา UI ตอน init ครั้งแรก
 let _statusInitDone = false;
 let _lastFocusedInput = null;
+let _lastConfigLoad = 0;  // timestamp of last config load from browse
 document.querySelectorAll('input').forEach(el=>{
   el.addEventListener('focus', ()=>{ _lastFocusedInput = el.id; });
   el.addEventListener('blur',  ()=>{ setTimeout(()=>{ if(_lastFocusedInput===el.id) _lastFocusedInput=null; }, 300); });
@@ -1423,10 +1449,13 @@ function getStatus() {
       hfEnabled=d.hip_fire_enabled;
       $('hf-pill').classList.toggle('on',hfEnabled); $('hf-lbl').textContent=hfEnabled?'ON':'OFF';
     }
-    // BUG FIX: ไม่ overwrite hf-pd / hf-hz ถ้า user กำลัง focus อยู่
-    // เพราะจะทำให้ค่าที่โหลดจาก config ถูก overwrite ด้วยค่า server (0)
-    if(d.hip_pull_down  !==undefined && _lastFocusedInput!=='hf-pd') $('hf-pd').value=d.hip_pull_down;
-    if(d.hip_horizontal !==undefined && _lastFocusedInput!=='hf-hz') $('hf-hz').value=d.hip_horizontal;
+    // FIX BUG 2: ไม่ overwrite hf-pd/hf-hz ถ้าเพิ่ง load config ภายใน 3 วินาที
+    // เพราะ getStatus อาจดึงค่าเก่าจาก server ก่อน WS/REST ส่งค่าใหม่ไปถึง
+    const now2 = Date.now();
+    if(now2 - _lastConfigLoad > 3000) {
+      if(d.hip_pull_down  !==undefined && _lastFocusedInput!=='hf-pd') $('hf-pd').value=d.hip_pull_down;
+      if(d.hip_horizontal !==undefined && _lastFocusedInput!=='hf-hz') $('hf-hz').value=d.hip_horizontal;
+    }
   }).catch(()=>{});
 }
 getStatus();
@@ -1516,6 +1545,17 @@ $('curve-load-btn').onclick=()=>{
   const v=Math.max(0,Math.min(300,safeNum($('sv').value))),N=40;
   pts=Array.from({length:N},(_,i)=>{const t=i/(N-1);const decay=Math.exp(-t*1.6)*0.45+0.55;return{x:t,y:1-Math.min(v*decay/300,1)};});
   drawCurve();
+};
+// Flat — curve ตรง ระดับเดียวกับค่าคงที่ (เส้นประ) แล้ว apply ทันที
+$('curve-flat-btn').onclick=()=>{
+  const v=Math.max(0,Math.min(300,safeNum($('sv').value)));
+  const flatY=1-Math.min(v/300,1);
+  pts=[{x:0,y:flatY},{x:0.25,y:flatY},{x:0.5,y:flatY},{x:0.75,y:flatY},{x:1,y:flatY}];
+  drawCurve();
+  const c=getCurve();
+  if(c&&ws&&ws.readyState===1)ws.send(JSON.stringify({pull_down_curve:c}));
+  $('cpv').style.display='inline-flex';
+  toast('✓ Flat curve applied');
 };
 $('curve-apply-btn').onclick=()=>{
   const c=getCurve();if(!c){showWarn('วาด curve ก่อน');return;}
@@ -1659,13 +1699,22 @@ $('cfgdd').onchange=()=>{
   $('uv').value=du;$('us').value=du;
   $('vdv').value=vdl;$('vds').value=vdl;
   $('vduv').value=vdu;$('vdus').value=vdu;
-  if(cfg.hip_pull_down!==undefined) $('hf-pd').value=cfg.hip_pull_down;
+  // FIX BUG 2a: set hip fire inputs then immediately push to server via REST
+  // (WS alone is too slow — getStatus() poll at 1s can overwrite before WS arrives)
+  if(cfg.hip_pull_down !==undefined) $('hf-pd').value=cfg.hip_pull_down;
   if(cfg.hip_horizontal!==undefined) $('hf-hz').value=cfg.hip_horizontal;
+  // FIX BUG 2b: always push hip fire values to server when loading config
+  _lastConfigLoad = Date.now();  // suppress getStatus overwrite for 3s
+  sendHF();
   const hasCurve=typeof cfg==='object'&&cfg.pull_down_curve;
   $('cpv').style.display=hasCurve?'inline-flex':'none';
   restoreCurve(hasCurve?cfg.pull_down_curve:null);
-  sendAll();
-  if(ws&&ws.readyState===1) ws.send(JSON.stringify({pull_down_curve:hasCurve?cfg.pull_down_curve:[]}));
+  // FIX BUG 2c: send all recoil values immediately via WS
+  // Use setTimeout(0) to ensure DOM values are committed before sendAll reads them
+  setTimeout(()=>{
+    sendAll();
+    if(ws&&ws.readyState===1) ws.send(JSON.stringify({pull_down_curve:hasCurve?cfg.pull_down_curve:[]}));
+  }, 0);
   const name=typeof cfg==='object'?(cfg.name||key):key;
   $('cfg-name').value=name;
   currentTags=typeof cfg==='object'&&cfg.tags?{...cfg.tags}:{};
@@ -1781,7 +1830,7 @@ def get_local_ip():
 
 if __name__ == "__main__":
     ip = get_local_ip()
-    print(f"\n  ┌─ RVN v5.1 ─────────────────────────────────────────┐")
+    print(f"\n  ┌─ RVN v5.2 ─────────────────────────────────────────┐")
     print(f"  │  Local  : http://localhost:8000                    │")
     print(f"  │  Network: http://{ip}:8000        │")
     print(f"  └────────────────────────────────────────────────────┘\n")
