@@ -841,13 +841,13 @@ async def set_hip_fire(cfg: HipFireConfig):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  UI  v5.1
+#  UI  v5.2
 # ══════════════════════════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html lang="th">
 <head>
 <meta charset="UTF-8">
-<title>RVN v5.1</title>
+<title>RVN v5.2</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
@@ -963,7 +963,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .sw-notice .w-line{color:#5a3a10;display:block;margin-top:4px;}
 .hf-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;}
 .hf-lbl{font-size:.6rem;color:var(--mu);margin-bottom:3px;font-family:var(--mo);text-transform:uppercase;letter-spacing:.5px;}
-/* v5.1 fix indicator */
+/* v5.2 fix indicator */
 .num-row{display:flex;align-items:baseline;gap:4px;margin-bottom:6px;}
 .unit{font-family:var(--mo);font-size:.62rem;color:var(--mu);}
 </style>
@@ -972,7 +972,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 <div class="w">
   <div class="hdr">
     <div class="logo">R<em>V</em>N</div>
-    <span class="vtag">v5.1 — RCS</span>
+    <span class="vtag">v5.2 — RCS</span>
     <span id="conn-dot" class="conn-dot" title="Controller connection"></span>
   </div>
 
