@@ -162,13 +162,13 @@ class KMBoxController:
         ip, port = cfg["ip"], int(cfg["port"]) if cfg["port"] else 8808
         uuid = cfg["uuid"].replace("-","").replace(" ","")
         if len(uuid) < 8:
-            print("[KMBox] UUID ไม่ได้กรอก — ต้องการ 4 bytes hex เช่น 4BD95C53")
+            print("[KMBox] UUID not filled in — requires 4 bytes hex, e.g., 4BD95C53")
             self._connected = False
             return False
         try:
             self._mac = bytes.fromhex(uuid[:8])
         except ValueError:
-            print(f"[KMBox] UUID ไม่ถูกต้อง: {uuid!r}")
+            print(f"[KMBox] UUID incorrect: {uuid!r}")
             self._connected = False
             return False
         try:
