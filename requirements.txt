@@ -5,4 +5,3 @@ pydantic>=2.12.15
 
 # Hardware controllers (install only what you use)
 makcu>=2.3.1           # MAKCU 2-PC hardware
-kmbox-universal>=0.1.1 # KMBox Net/Pro 2-PC hardware
