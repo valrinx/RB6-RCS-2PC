@@ -44,6 +44,7 @@ Download the release, then install dependencies:
 
 ```bash
 pip install -r requirements.txt
+pip install kmNet
 ```
 
 If accessing from another device on your network, allow port 8000 through Windows Firewall (run in PowerShell as admin):
