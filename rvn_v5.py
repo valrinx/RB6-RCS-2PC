@@ -1162,7 +1162,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div class="clabel">Software Direct Mode</div>
       <div class="sw-notice">
         SendInput Windows API<br>ทำงานบน <strong>1-PC</strong> โดยไม่ต้องมีฮาร์ดแวร์ภายนอก
-        <span class="w-line">⚠ ต้องรัน Python บน Windows เท่านั้น<br>⚠ อาจตรวจจับได้โดย BattleEye / EAC</span>
+        <span class="w-line">⚠ ต้องรัน Python บน Windows เท่านั้น<br>⚠ อาจตรวจจับได้โดย Anti-Cheat</span>
       </div>
       <div id="sw-status" style="margin-top:8px;font-size:.68rem;font-family:var(--mo);color:var(--mu);">—</div>
     </div>
