@@ -159,9 +159,18 @@ class KMBoxController:
 
     def connect(self):
         cfg  = app_state.get_kmbox_config()
-        ip, port = cfg["ip"], int(cfg["port"]) if cfg["port"] else 1408
+        ip, port = cfg["ip"], int(cfg["port"]) if cfg["port"] else 8808
         uuid = cfg["uuid"].replace("-","").replace(" ","")
-        self._mac = bytes.fromhex(uuid[:8]) if len(uuid) >= 8 else b'\x00\x00\x00\x00'
+        if len(uuid) < 8:
+            print("[KMBox] UUID ไม่ได้กรอก — ต้องการ 4 bytes hex เช่น 4BD95C53")
+            self._connected = False
+            return False
+        try:
+            self._mac = bytes.fromhex(uuid[:8])
+        except ValueError:
+            print(f"[KMBox] UUID ไม่ถูกต้อง: {uuid!r}")
+            self._connected = False
+            return False
         try:
             if self._sock:
                 try: self._sock.close()
@@ -171,14 +180,22 @@ class KMBoxController:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.settimeout(2.0)
             self._sock = sock
+            # cache ip+port ณ เวลา connect — ไม่ดึง config ใหม่ทุก packet
+            self._ip   = ip
+            self._port = port
             sock.sendto(self._build(self.CMD_CONNECT, b'\x00'*4), (ip, port))
             resp, _ = sock.recvfrom(1024)
             if len(resp) >= 16:
                 self._connected = True
                 sock.settimeout(0.05)
                 self.StartButtonListener()
+                print(f"[KMBox] Connected {ip}:{port} (UUID={uuid[:8]})")
                 return True
             raise Exception(f"Bad handshake ({len(resp)} bytes)")
+        except socket.timeout:
+            print(f"[KMBox] Timeout — ตรวจสอบ IP ({ip}) และ Port ({port})")
+            self._connected = False
+            return False
         except Exception as e:
             print(f"[KMBox] Failed: {e}")
             self._connected = False
@@ -234,8 +251,8 @@ class KMBoxController:
                 + payload + b'\x00' * max(0, 48 - len(payload)))
 
     def _addr(self):
-        c = app_state.get_kmbox_config()
-        return (c["ip"], int(c["port"]) if c["port"] else 1408)
+        # ใช้ cached ip/port ที่ set ตอน connect() — ไม่ดึง config ทุก packet
+        return (getattr(self, '_ip', ''), getattr(self, '_port', 8808))
 
 
 software_controller = SoftwareController()
@@ -368,7 +385,7 @@ class AppState:
         self.trigger_mode            = "LMB"
         self.controller_type         = "makcu"
         self.kmbox_ip                = "192.168.2.188"
-        self.kmbox_port              = 1408
+        self.kmbox_port              = 8808
         self.kmbox_uuid              = ""
         # ── Rapid Fire ───────────────────────────────────────────────────────
         self.rapid_fire_enabled      = False
@@ -760,8 +777,14 @@ async def save_kmbox(r: KMBoxConfigRequest):
 @app.post("/kmbox-connect")
 async def kmbox_connect():
     kmbox_controller.disconnect()
+    cfg = app_state.get_kmbox_config()
+    uuid = cfg["uuid"].replace("-","").replace(" ","")
+    if len(uuid) < 8:
+        return {"connected": False, "message": "UUID ไม่ได้กรอก — ต้องการ 8 hex chars เช่น 4BD95C53"}
     ok = kmbox_controller.connect()
-    return {"connected": ok, "message": "Connected" if ok else "Failed — check IP/Port/UUID"}
+    if ok:
+        return {"connected": True, "message": f"เชื่อมต่อสำเร็จ {cfg['ip']}:{cfg['port']}"}
+    return {"connected": False, "message": f"เชื่อมต่อไม่ได้ — ตรวจสอบ IP/Port/UUID ใน KMBox Client"}
 
 @app.get("/config-files")
 async def get_config_files():
@@ -1144,11 +1167,11 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:9px;">
         <div>
           <label style="font-size:.64rem;color:var(--mu);display:block;margin-bottom:4px;text-transform:uppercase;">Port</label>
-          <input type="text" id="km-port" placeholder="1408">
+          <input type="text" id="km-port" placeholder="8808">
         </div>
         <div>
-          <label style="font-size:.64rem;color:var(--mu);display:block;margin-bottom:4px;text-transform:uppercase;">UUID (opt)</label>
-          <input type="text" id="km-uuid" placeholder="xxxxxxxx">
+          <label style="font-size:.64rem;color:var(--rd);display:block;margin-bottom:4px;text-transform:uppercase;">UUID ★ จำเป็น</label>
+          <input type="text" id="km-uuid" placeholder="4BD95C53" style="border-color:#3a1820;">
         </div>
       </div>
       <div class="row">
@@ -1156,6 +1179,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
         <button class="btn btn-g" id="km-conn" style="flex:1">เชื่อมต่อ</button>
       </div>
       <div id="km-msg" style="margin-top:7px;font-size:.7rem;color:var(--mu);min-height:1.2em;font-family:var(--mo)"></div>
+      <div class="hint" style="margin-top:8px;line-height:1.7">UUID หาได้จาก KMBox Client → Device Info<br>Port: KMBox Net = <span style="color:var(--ac);font-family:var(--mo)">8808</span> · KMBox Pro = <span style="color:var(--ac);font-family:var(--mo)">8808</span></div>
     </div>
 
     <div class="card" id="sw-card" style="display:none">
@@ -1483,8 +1507,9 @@ $('trig').onchange=()=>
 
 const kmsg=(t,c)=>{$('km-msg').textContent=t;$('km-msg').style.color=c||'var(--mu)';};
 $('km-save').onclick=()=>{
-  const ip=$('km-ip').value.trim(),port=+$('km-port').value||1408,uuid=$('km-uuid').value.trim();
+  const ip=$('km-ip').value.trim(),port=+$('km-port').value||8808,uuid=$('km-uuid').value.trim().replace(/-/g,'').replace(/ /g,'');
   if(!ip){kmsg('กรุณากรอก IP','var(--rd)');return;}
+  if(uuid.length<8){kmsg('กรุณากรอก UUID (เช่น 4BD95C53)','var(--rd)');return;}
   fetch('/kmbox-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,port,uuid})})
     .then(()=>kmsg('✓ บันทึกแล้ว','var(--ac)')).catch(()=>kmsg('ไม่สำเร็จ','var(--rd)'));
 };
