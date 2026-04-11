@@ -18,9 +18,14 @@ Works with any game — R6, Rust, CS2, Valorant, or anything else.
 - **Vertical pull-down** with Delay and Duration timing
 - **Horizontal compensation** with Delay and Duration timing
 - **Recoil Curve editor** — draw a custom pull pattern per gun
+  - **Decay** — generates a realistic decaying curve from the constant value
+  - **Flat** — sets the curve to a straight line matching the constant value
+  - When the curve runs out, falls back to the constant value automatically
+- **Rapid Fire** — auto-clicks LMB at a set interval (for semi-auto weapons)
+- **Hip Fire override** — separate pull-down and horizontal values when not ADS
 - **Humanization** — Jitter + Exponential Smoothing to reduce pattern detection
 - **Game-agnostic config system** — save configs with free-form tags (`game`, `attach`, `scope`, etc.)
-- **Tag-based browsing** — filter saved configs by any tag
+- **Tag-based browsing** — filter saved configs by any tag; search by name or tag
 - **Multiple controller support** — MAKCU, KMBox Net/Pro, or Software Direct (1-PC)
 - **Multi-profile system** — separate `.json` files per game or loadout
 - Web UI accessible from phone or second PC on the same network
@@ -49,10 +54,10 @@ New-NetFirewallRule -DisplayName "RVN Port 8000" -Direction Inbound -Action Allo
 
 ## Usage
 
-Double-click `rvn.py`, or run in terminal:
+Double-click `rvn_v5.py`, or run in terminal:
 
 ```bash
-python rvn.py
+python rvn_v5.py
 ```
 
 The console will print the URLs to open:
@@ -74,7 +79,9 @@ Open that URL in any browser — works from your phone too.
 | **Horizontal** | Left/right compensation (negative = left, positive = right) |
 | **Horizontal Delay** | How long before horizontal kicks in (ms) |
 | **Horizontal Duration** | How long horizontal lasts — 0 = forever |
-| **Recoil Curve** | Draw a custom pull pattern — overrides the constant value |
+| **Recoil Curve** | Draw a custom pull pattern — overrides the constant value while the curve lasts, then falls back to the constant |
+| **Rapid Fire** | Auto-click LMB at a fixed interval — for semi-auto weapons; disables RCS pull-down while active |
+| **Hip Fire** | Separate pull-down and horizontal values used when firing without ADS (no RMB held) |
 | **Jitter** | Gaussian noise per tick to randomize movement slightly |
 | **Smooth** | Exponential smoothing — higher = softer, more natural movement |
 | **Toggle key** | M4, M5, or Middle Mouse — toggles recoil on/off in-game |
@@ -86,6 +93,8 @@ Configs are saved per profile (`.json` file). Each config has:
 
 - **Name** — any name you want (e.g. `AK47`, `MP5K Comp`)
 - **Tags** — optional key:value pairs for filtering (e.g. `game:Rust`, `attach:Compensator`)
+
+The browse dropdown shows only the gun name and pull-down value for a clean look. Hover over an entry to see its full tags, or use the search bar to filter by name or tag.
 
 Example tags for different games:
 
