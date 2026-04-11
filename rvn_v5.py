@@ -1469,7 +1469,7 @@ function ctrlUI(ct, connected) {
   const [cls,txt]=M[ct]||['mk','—'];
   $('cbw').innerHTML=`<span class="cbadge ${cls}">${txt}</span>`;
   if(ct==='software'){
-    $('sw-status').textContent=connected?'✓ ready — SendInput active':'✗ Not ready (Windows only)';
+    $('sw-status').textContent=connected?'✓ Ready — SendInput active':'✗ Not Ready (Windows only)';
     $('sw-status').style.color=connected?'var(--ac)':'var(--rd)';
   }
 }
