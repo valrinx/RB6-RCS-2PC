@@ -9,7 +9,7 @@
 > [!NOTE]
 > Windows mouse sensitivity should be left at the default (6/11) for accurate results.
 
-> [!UPDATE]
+> [UPDATE]
 > RVN — Recoil Control System  v5.5
 Changes from v5.4:
   • FIX: Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
