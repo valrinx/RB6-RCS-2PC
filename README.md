@@ -7,15 +7,12 @@
 > The MAKXD (new makcu) will have built-in advanced RCS, which may eventually make this tool obsolete for makcu users. Software Direct mode (1-PC, no hardware) is still fully supported.
 
 > [!NOTE]
-> Windows mouse sensitivity should be left at the default (6/11) for accurate results.
-
-> [!NOTE]
 > **RVN — Recoil Control System v5.5**
 >
-> **อัปเดตจาก v5.4:**
-> - **FIX:** Trigger mode "LMB Only" (ปุ่มซ้ายเมาส์เท่านั้น) ตอนนี้จะทำงานถูกต้องในโหมด hold-to-fire แล้ว  
->    (ก่อนหน้านี้ state ของปุ่มถูกปนเปื้อนด้วย RF synthetic clicks ทำให้สถานะค้าง)
-> - ลูปหลักจะอ่านค่าปุ่ม LMB แบบฟิสิคอล เหมือนกับ worker RF ทุกประการ
+> **Changes from v5.4:**
+> - **FIX:** Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
+>    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
+> -  The main loop now reads physical LMB the same way as the RF worker.
     
 A game-agnostic recoil control script with a web UI. Supports MAKCU, KMBox, and Software Direct (no hardware, 1-PC).
 
