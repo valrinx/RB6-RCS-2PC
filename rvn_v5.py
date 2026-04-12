@@ -1,18 +1,18 @@
 """
 RVN — Recoil Control System  v5.2
 Bug fixes from v5.1:
-  • FIX BUG 1: Rapid Fire works correctly for semi-auto guns —
-    Hold LMB → spam click_lmb() with interval set
-    Skip all RCS (pull down) when RF is open because semi-auto guns shoot one round at a time
-    No continuous recoil
-    Use raw_lmb directly — GetAsyncKeyState/MAKCU callback reads physical
-    hardware not affected by click_lmb() synthetic
-  • FIX BUG 2a: Browse config load gun then RCS/Rapid doesn't work — cfgdd.onchange
-    Didn't call sendHF() after setting hip fire values → server still has hip=0
-  • FIX BUG 2b: cfgdd.onchange call sendAll() before DOM update is complete
-    Fix: use setTimeout(0) to let JS event loop commit input values
-  • FIX BUG 2c: getStatus() overwrite hf-pd/hf-hz every 1 second with old values
-    from server — suppress overwrite 3 seconds after load config (_lastConfigLoad)
+  • FIX BUG 1: Rapid Fire ทำงานถูกต้องสำหรับปืน semi —
+    กด LMB ค้าง → spam click_lmb() ด้วย interval ที่ตั้ง
+    ข้าม RCS (pull down) ทั้งหมดเมื่อ RF เปิด เพราะปืน semi ยิงทีละนัด
+    ไม่มี recoil ต่อเนื่อง
+    ใช้ raw_lmb โดยตรง — GetAsyncKeyState/MAKCU callback อ่าน physical
+    hardware ไม่ได้รับผลกระทบจาก click_lmb() synthetic ของตัวเอง
+  • FIX BUG 2a: Browse config โหลดปืนแล้ว RCS/Rapid ไม่ทำงาน — cfgdd.onchange
+    ไม่ได้เรียก sendHF() หลัง set hip fire values → server ยังมีค่า hip=0
+  • FIX BUG 2b: cfgdd.onchange เรียก sendAll() ก่อน DOM update เสร็จ
+    แก้: ใช้ setTimeout(0) ให้ JS event loop commit ค่า input ก่อน
+  • FIX BUG 2c: getStatus() overwrite hf-pd/hf-hz ทุก 1 วินาทีด้วยค่าเก่าจาก
+    server — แก้: suppress overwrite 3 วินาทีหลัง load config (_lastConfigLoad)
 """
 
 import threading
@@ -122,133 +122,213 @@ class SoftwareController:
             print(f"[Software] move error: {e}")
 
     def click_lmb(self):
-        """Send a single LMB down+up click via SendInput."""
+        """RF click: ส่ง LEFTDOWN+LEFTUP ผ่าน SendInput
+        RF worker อ่าน GetAsyncKeyState โดยตรง (ไม่ผ่าน btn[] cache)
+        ดังนั้น synthetic LEFTUP ไม่กระทบ physical state check ของ worker"""
         if not self._ready: return
         try:
+            import ctypes as _ct
             inp_down = self._INPUT(type=0)
             inp_down.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0, dwFlags=self.MOUSEEVENTF_LEFTDOWN, time=0, dwExtraInfo=None)
+            self._user32.SendInput(1, _ct.byref(inp_down), self._INPUT_sz)
+            time.sleep(0.010)
             inp_up = self._INPUT(type=0)
             inp_up.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0, dwFlags=self.MOUSEEVENTF_LEFTUP, time=0, dwExtraInfo=None)
-            arr = (self._INPUT * 2)(inp_down, inp_up)
-            self._user32.SendInput(2, arr, self._INPUT_sz)
+            self._user32.SendInput(1, _ct.byref(inp_up), self._INPUT_sz)
         except Exception as e:
             print(f"[Software] click error: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  KMBoxController  — ใช้ kmNet library (pip install kmNet)
+#  KMBoxController  — KMBox Net UDP Protocol
+#
+#  Packet format (64 bytes total):
+#    [0:4]   mac       = UUID bytes (4 bytes, little-endian hex)
+#    [4:8]   rand      = random uint32 (set once at connect)
+#    [8:12]  indexpts  = sequence number uint32
+#    [12:16] cmd       = command uint32
+#    [16:64] payload   = command-specific data (48 bytes, zero-padded)
+#
+#  Commands:
+#    0x000E  CONNECT   payload: 4 zero bytes
+#    0x0001  MOVE      payload: struct hhhB (x, y, wheel, 0)
+#    0x0004  LEFTCLICK payload: struct BB (state, 0)  state: 1=down 0=up
+#    0x0100  MONITOR   payload: struct I (button_mask)
+#               response[16:20] = current button state bitmask
+#
+#  Button mask: LMB=1 RMB=2 MMB=4 M4=8 M5=16
 # ══════════════════════════════════════════════════════════════════════════════
-
-# lazy import — จะลอง import จริงตอน connect() เพื่อรองรับ pip install หลังรัน
-_kmNet     = None
-_HAS_KMNET = False
-
-def _try_import_kmnet():
-    """Try to import kmNet with different names — return module or None"""
-    for name in ("kmNet", "kmnet", "kmbox"):
-        try:
-            import importlib
-            mod = importlib.import_module(name)
-            return mod
-        except ImportError:
-            continue
-    return None
+import struct as _struct
 
 class KMBoxController:
-    _BTN_MASK = {"LMB": 1, "RMB": 2, "MMB": 4, "M4": 8, "M5": 16}
+    CMD_CONNECT = 0x000E
+    CMD_MOVE    = 0x0001
+    CMD_CLICK   = 0x0004
+    CMD_MONITOR = 0x0100
+    _BTN        = {"LMB": 1, "RMB": 2, "MMB": 4, "M4": 8, "M5": 16}
 
     def __init__(self):
-        self._connected   = False
-        self._lock        = threading.Lock()
-        self._btn_cache: dict = {k: False for k in self._BTN_MASK}
-        self._poll_thread: threading.Thread | None = None
-        # throttle: ไม่ print error ซ้ำๆ ทุก 0.5 วินาที
-        self._last_err_print = 0.0
-        self._no_lib_logged  = False
+        self._sock            = None
+        self._connected       = False
+        self._ip              = ""
+        self._port            = 57856
+        self._mac             = b'\x00'*4
+        self._rand            = 0
+        self._seq             = 0
+        self._send_lock       = threading.Lock()  # สำหรับส่ง packet (move/click)
+        self._seq_lock        = threading.Lock()  # สำหรับ seq counter
+        self._btn_lock        = threading.Lock()  # สำหรับ btn_cache
+        self._click_lock      = threading.Lock()  # แยกสำหรับ click_lmb โดยเฉพาะ — ป้องกัน block กับ monitor
+        self._btn_cache: dict = {k: False for k in self._BTN}
+        self._monitor_thread: threading.Thread | None = None
+        self._last_err        = 0.0
 
     def is_connected(self): return self._connected
 
     def connect(self):
-        global _kmNet, _HAS_KMNET
-        # lazy import — ลอง import ทุกครั้งที่ connect เพื่อรองรับ pip install ระหว่างรัน
-        if not _HAS_KMNET:
-            mod = _try_import_kmnet()
-            if mod:
-                _kmNet     = mod
-                _HAS_KMNET = True
-                self._no_lib_logged = False
-                print("[KMBox] kmNet ready")
-            else:
-                # print เตือนแค่ครั้งแรก ไม่ spam
-                if not self._no_lib_logged:
-                    print("[KMBox] kmNet not found — run: pip install kmNet  then restart")
-                    self._no_lib_logged = True
-                return False
-
         cfg  = app_state.get_kmbox_config()
         ip   = cfg["ip"].strip()
-        port = str(cfg["port"]) if cfg["port"] else "8808"
-        uuid = cfg["uuid"].replace("-", "").replace(" ", "").upper()
+        port = int(cfg["port"]) if cfg["port"] else 57856
+        uuid = cfg["uuid"].replace("-","").replace(" ","").upper()
+
         if len(uuid) < 8:
-            now = time.perf_counter()
-            if now - self._last_err_print > 10:
-                print("[KMBox] UUID is incorrect — must be 8 hex chars like F2083CAB")
-                self._last_err_print = now
+            print("[KMBox] UUID ไม่ถูกต้อง — ต้องการ 8 hex chars เช่น F2083CAB")
             return False
         try:
-            _kmNet.init(ip, port, uuid[:8])
+            uuid_int  = int(uuid[:8], 16)
+            self._mac = _struct.pack('<I', uuid_int)
+        except ValueError:
+            print(f"[KMBox] UUID ไม่ใช่ hex: {uuid!r}")
+            return False
+
+        with self._send_lock:
+            if self._sock:
+                try: self._sock.close()
+                except: pass
+                self._sock = None
+
+        try:
+            self._rand = random.randint(1, 0xFFFFFFFF)
+            self._seq  = 0
+            self._ip   = ip
+            self._port = port
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(2.0)
+
+            pkt = self._build(self.CMD_CONNECT, b'\x00'*4)
+            print(f"[KMBox] Connecting {ip}:{port} uuid={uuid[:8]} mac={self._mac.hex()}")
+            sock.sendto(pkt, (ip, port))
+
+            try:
+                resp, addr = sock.recvfrom(1024)
+                print(f"[KMBox] Handshake OK — {len(resp)} bytes from {addr}: {resp.hex()[:24]}")
+            except socket.timeout:
+                sock.close()
+                print(f"[KMBox] Timeout — device ไม่ตอบสนอง")
+                print(f"[KMBox] ตรวจสอบ: IP={ip}, Port={port}, UUID={uuid[:8]}")
+                self._connected = False
+                return False
+
+            sock.settimeout(0.05)
+            with self._send_lock:
+                self._sock = sock
             self._connected = True
-            self._no_lib_logged = False
-            print(f"[KMBox/kmNet] Connected → {ip}:{port} uuid={uuid[:8]}")
+            print(f"[KMBox] Connected ✓ {ip}:{port}")
             self.StartButtonListener()
             return True
+
+        except socket.timeout:
+            print(f"[KMBox] Timeout — device ไม่ตอบสนอง IP:{ip} Port:{port}")
+            self._connected = False
+            return False
         except Exception as e:
             now = time.perf_counter()
-            if now - self._last_err_print > 5:
-                print(f"[KMBox/kmNet] Connect error: {e}")
-                self._last_err_print = now
+            if now - self._last_err > 5:
+                print(f"[KMBox] เชื่อมต่อไม่ได้: {e}")
+                self._last_err = now
             self._connected = False
             return False
 
     def disconnect(self):
         self._connected = False
+        with self._send_lock:
+            if self._sock:
+                try: self._sock.close()
+                except: pass
+                self._sock = None
 
     def StartButtonListener(self):
-        if self._poll_thread and self._poll_thread.is_alive(): return
+        if self._monitor_thread and self._monitor_thread.is_alive(): return
         def _poll():
             while self._connected:
-                try:
-                    state_raw = _kmNet.isdown(0)
-                    with self._lock:
-                        for btn, mask in self._BTN_MASK.items():
-                            self._btn_cache[btn] = bool(state_raw & mask)
-                except Exception:
-                    pass
-                time.sleep(0.005)
-        self._poll_thread = threading.Thread(target=_poll, daemon=True)
-        self._poll_thread.start()
+                for btn, mask in self._BTN.items():
+                    # monitor ใช้ send_lock แยกกับ btn_lock
+                    with self._send_lock:
+                        if not self._sock: break
+                        try:
+                            self._sock.sendto(
+                                self._build(self.CMD_MONITOR, _struct.pack('<I', mask)),
+                                (self._ip, self._port)
+                            )
+                            resp, _ = self._sock.recvfrom(1024)
+                            state = bool(_struct.unpack_from('<I', resp, 16)[0] & mask) if len(resp) >= 20 else False
+                        except socket.timeout:
+                            state = False
+                        except Exception:
+                            self._connected = False; break
+                    with self._btn_lock:
+                        self._btn_cache[btn] = state
+                time.sleep(0.008)
+        self._monitor_thread = threading.Thread(target=_poll, daemon=True)
+        self._monitor_thread.start()
 
     def get_button_state(self, btn):
-        with self._lock: return self._btn_cache.get(btn, False)
+        with self._btn_lock: return self._btn_cache.get(btn, False)
 
     def simple_move_mouse(self, x, y):
         if not self._connected or (x == 0 and y == 0): return
-        try:
-            _kmNet.move(x, y)
-        except Exception as e:
-            print(f"[KMBox/kmNet] move error: {e}")
-            self._connected = False
+        with self._send_lock:
+            if not self._sock: return
+            try:
+                self._sock.sendto(
+                    self._build(self.CMD_MOVE, _struct.pack('<hhhB', x, y, 0, 0)),
+                    (self._ip, self._port)
+                )
+            except Exception as e:
+                print(f"[KMBox] move error: {e}")
+                self._connected = False
 
     def click_lmb(self):
+        """LMB click — ใช้ click_lock แยกจาก send_lock เพื่อไม่ block กับ monitor thread
+        ทำให้ rapid fire click ไม่ต้องรอ monitor poll 8ms ก่อนทุกครั้ง"""
         if not self._connected: return
-        try:
-            _kmNet.left(1)
-            time.sleep(0.01)
-            _kmNet.left(0)
-        except Exception as e:
-            print(f"[KMBox/kmNet] click error: {e}")
-            self._connected = False
+        with self._click_lock:
+            if not self._sock: return
+            try:
+                # กด LMB
+                self._sock.sendto(
+                    self._build(self.CMD_CLICK, _struct.pack('<BB', 1, 0)),
+                    (self._ip, self._port)
+                )
+                time.sleep(0.008)
+                # ปล่อย LMB
+                self._sock.sendto(
+                    self._build(self.CMD_CLICK, _struct.pack('<BB', 0, 0)),
+                    (self._ip, self._port)
+                )
+            except Exception as e:
+                print(f"[KMBox] click error: {e}")
+                self._connected = False
 
+    def _build(self, cmd: int, payload: bytes) -> bytes:
+        """สร้าง 64-byte KMBox Net packet — thread-safe seq counter"""
+        with self._seq_lock:
+            self._seq += 1
+            seq = self._seq
+        header = self._mac + _struct.pack('<III', self._rand, seq, cmd)
+        body   = payload + b'\x00' * max(0, 48 - len(payload))
+        return header + body  # 4 + 12 + 48 = 64 bytes
 
 software_controller = SoftwareController()
 kmbox_controller    = KMBoxController()
@@ -342,7 +422,7 @@ class ConfigFileRequest(BaseModel):     filename: str
 
 class KMBoxConfigRequest(BaseModel):
     ip:   str = Field(..., min_length=7, max_length=64)
-    port: int = Field(default=8808, ge=1, le=65535)
+    port: int = Field(default=57856, ge=1, le=65535)
     uuid: str = Field(default="")
 
 class HumanizeConfig(BaseModel):
@@ -362,6 +442,25 @@ class HipFireConfig(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 #  AppState
 # ══════════════════════════════════════════════════════════════════════════════
+# ── Beep helper ──────────────────────────────────────────────────────────────
+def _play_beep(enabled: bool):
+    """เล่นเสียง beep น่ารักตอน toggle — ใช้ winsound บน Windows, fallback เป็น print"""
+    try:
+        import winsound
+        if enabled:
+            # ON: สองโน้ตสั้นขึ้น (ไพเราะ)
+            winsound.Beep(880, 60)
+            time.sleep(0.04)
+            winsound.Beep(1320, 80)
+        else:
+            # OFF: สองโน้ตสั้นลง
+            winsound.Beep(880, 60)
+            time.sleep(0.04)
+            winsound.Beep(587, 80)
+    except Exception:
+        pass   # non-Windows หรือไม่มี audio → เงียบ
+
+
 class AppState:
     def __init__(self):
         self.active_pull_down_value  = 1.0
@@ -375,12 +474,13 @@ class AppState:
         self.jitter_strength         = 0.15
         self.smooth_factor           = 0.60
         self.is_enabled              = False
+        self.beep_enabled            = True   # เสียง beep ตอน toggle on/off
         self.toggle_button           = "M5"
         self.current_config_file     = DEFAULT_CONFIG_FILE
         self.trigger_mode            = "LMB"
         self.controller_type         = "makcu"
         self.kmbox_ip                = "192.168.2.188"
-        self.kmbox_port              = 8808
+        self.kmbox_port              = 57856
         self.kmbox_uuid              = ""
         # ── Rapid Fire ───────────────────────────────────────────────────────
         self.rapid_fire_enabled      = False
@@ -431,7 +531,15 @@ class AppState:
     def toggle_enabled(self):
         with self.lock:
             self.is_enabled = not self.is_enabled
-            return self.is_enabled
+            state = self.is_enabled
+            beep  = self.beep_enabled
+        if beep:
+            # beep ใน thread แยกเพื่อไม่บล็อก loop
+            threading.Thread(target=_play_beep, args=(state,), daemon=True).start()
+        return state
+
+    def set_beep(self, v):   self._s('beep_enabled', bool(v))
+    def get_beep(self):      return self._g('beep_enabled')
 
     def set_toggle_button(self, b):
         with self.lock:
@@ -503,12 +611,12 @@ class AppState:
                 "has_pull_curve":         self.pull_down_curve is not None,
                 "has_horiz_curve":        self.horizontal_curve is not None,
                 "ctrl_connected":         ctrl.is_connected(),
-                "kmnet_installed":        _HAS_KMNET,
                 "rapid_fire_enabled":     rf_en,
                 "rapid_fire_interval_ms": rf_ms,
                 "hip_fire_enabled":       hf_en,
                 "hip_pull_down":          hf_pd,
                 "hip_horizontal":         hf_hz,
+                "beep_enabled":           self.beep_enabled,
             }
 
 
@@ -557,12 +665,73 @@ def mouse_control_loop():
     smoother      = _Smoother()
     _listener_started = {"makcu": False, "kmbox": False, "software": False}
 
-    # Rapid fire state
-    last_rf_click  = 0.0
-    # retry backoff — ไม่ spam connect เมื่อ library หาย / UUID ผิด
-    _retry_delay   = 0.5
+    # retry backoff
+    _retry_delay          = 0.5
     _last_connect_attempt = 0.0
-    _last_ctrl_key = None
+    _last_ctrl_key        = None
+
+    # ── Rapid Fire Worker — AHK-style ───────────────────────────────────────
+    #
+    # อ้างอิงจาก AHK Script 1:
+    #   LButton::
+    #   while GetKeyState("LButton", "P") {  ; P = physical only
+    #       Click, left
+    #   }
+    #
+    # หลักการ: RF worker อ่าน physical LMB state ด้วยตัวเองโดยตรง
+    # ไม่พึ่ง main loop, ไม่พึ่ง btn[] cache ที่ถูก synthetic LEFTUP ทำให้เสีย
+    # Software mode: ใช้ ctypes GetAsyncKeyState โดยตรงใน worker
+    # KMBox/MAKCU mode: อ่าน btn_cache ที่ monitor thread อัปเดต (ไม่มีปัญหา synthetic)
+    #
+    def _read_lmb_physical():
+        """อ่าน physical LMB state โดยตรง — ใช้เฉพาะใน RF worker"""
+        ctrl = get_active_controller()
+        ct = app_state.get_controller_type()
+        if ct == "software":
+            # อ่านตรงจาก Windows API ข้าม btn[] cache ที่อาจเสียจาก synthetic
+            try:
+                import ctypes
+                return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+            except Exception:
+                return False
+        else:
+            # KMBox/MAKCU: btn_cache อัปเดตจาก hardware โดยตรง ไม่มีปัญหา synthetic
+            return ctrl.get_button_state("LMB")
+
+    def _rf_worker():
+        """AHK-style rapid fire:
+        while held: click → sleep(interval) → repeat
+        ไม่มี flag จาก main loop — อ่าน physical state ด้วยตัวเอง
+        """
+        while True:
+            try:
+                rf_en, rf_ms = app_state.get_rapid_fire()
+                if not rf_en:
+                    time.sleep(0.020)
+                    continue
+
+                trigger_mode = app_state.get_trigger_mode()
+                lmb = _read_lmb_physical()
+                rmb = get_active_controller().get_button_state("RMB")
+                held = (lmb and rmb) if trigger_mode == "LMB+RMB" else lmb
+
+                if held:
+                    # กำลังกดค้าง → click แล้ว loop ต่อทันที
+                    get_active_controller().click_lmb()
+                    # sleep interval หลัง click (รวม click_lmb ที่มี sleep 8-10ms ภายใน)
+                    interval = max(0.020, rf_ms / 1000.0)
+                    elapsed = 0.010  # click_lmb ใช้เวลาประมาณ 10ms
+                    remaining = interval - elapsed
+                    if remaining > 0:
+                        time.sleep(remaining)
+                else:
+                    time.sleep(0.005)
+
+            except Exception:
+                time.sleep(0.010)
+
+    _rf_thread = threading.Thread(target=_rf_worker, daemon=True, name="RapidFireWorker")
+    _rf_thread.start()
 
     while True:
         t0 = time.perf_counter()
@@ -605,27 +774,6 @@ def mouse_control_loop():
 
             raw_lmb = ctrl.get_button_state("LMB")
             rmb     = ctrl.get_button_state("RMB")
-
-            rf_en, rf_ms = app_state.get_rapid_fire()
-
-            # ── Rapid Fire — กด LMB ค้าง → spam click อัตโนมัติ ──────────────
-            # ใช้ raw_lmb โดยตรง — GetAsyncKeyState/KMBox monitor/MAKCU callback
-            # อ่าน physical hardware ไม่ได้รับผลกระทบจาก click_lmb() synthetic
-            if rf_en and app_state.get_enabled() and raw_lmb:
-                now = time.perf_counter()
-                if (now - last_rf_click) * 1000 >= rf_ms:
-                    ctrl.click_lmb()
-                    last_rf_click = now
-                # RF เปิด → ข้าม RCS ทั้งหมด (ปืน semi ไม่มี recoil ต่อเนื่อง)
-                hold_start = None
-                curve_tick = 0
-                smoother.reset()
-                # ข้ามไป timing wait แทน continue เพื่อให้ elapsed คำนวณถูก
-                elapsed = time.perf_counter() - t0
-                coarse = TICK_S - elapsed - 0.001
-                if coarse > 0: time.sleep(coarse)
-                while (time.perf_counter() - t0) < TICK_S: pass
-                continue
 
             lmb = raw_lmb
 
@@ -772,7 +920,7 @@ async def set_trigger_mode(c: TriggerModeConfig):
 async def set_controller_type(c: ControllerTypeConfig):
     r = app_state.set_controller_type(c.controller)
     if r is None: raise HTTPException(400, f"Must be one of {VALID_CONTROLLERS}")
-    return {"controller_type": r, "kmnet_installed": _HAS_KMNET}
+    return {"controller_type": r}
 
 @app.get("/kmbox-config")
 async def get_kmbox():
@@ -791,8 +939,6 @@ async def kmbox_connect():
     kmbox_controller.disconnect()
     cfg = app_state.get_kmbox_config()
     uuid = cfg["uuid"].replace("-","").replace(" ","")
-    if not _HAS_KMNET:
-        return {"connected": False, "message": "kmNet ไม่ได้ติดตั้ง — รัน: pip install kmNet"}
     if len(uuid) < 8:
         return {"connected": False, "message": "UUID ไม่ได้กรอก — ต้องการ 8 hex chars เช่น 4BD95C53"}
     ok = kmbox_controller.connect()
@@ -875,6 +1021,14 @@ async def set_hip_fire(cfg: HipFireConfig):
     app_state.set_hip_fire(cfg.enabled, cfg.pull_down, cfg.horizontal)
     en, pd, hz = app_state.get_hip_fire()
     return {"hip_fire_enabled": en, "hip_pull_down": pd, "hip_horizontal": hz}
+
+class BeepConfig(BaseModel):
+    enabled: bool = True
+
+@app.post("/beep")
+async def set_beep(cfg: BeepConfig):
+    app_state.set_beep(cfg.enabled)
+    return {"beep_enabled": app_state.get_beep()}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1023,6 +1177,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
         <option value="M4">M4 (Side Back)</option>
         <option value="M5" selected>M5 (Side Forward)</option>
       </select>
+      <button id="beep-btn" title="เสียง Beep on/off" style="margin-left:auto;padding:3px 10px;border-radius:12px;font-size:.7rem;font-family:var(--mo);cursor:pointer;border:1px solid var(--bd2);background:var(--bg);color:var(--mu);transition:all .2s;">🔔</button>
     </div>
   </div>
 
@@ -1175,21 +1330,17 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
     </div>
 
     <div class="card" id="kmbox-card" style="display:none">
-      <div class="clabel">KMBox — kmNet</div>
-      <div id="kmnet-warn" class="sw-notice" style="display:none;color:var(--rd);border-color:#3a1020;background:#0f0408;margin-bottom:10px;">
-        ⚠ kmNet ไม่ได้ติดตั้ง<br>
-        <span style="color:var(--mu);">รันคำสั่ง: <span style="color:var(--yl);font-family:var(--mo)">pip install kmNet</span></span>
-      </div>
+      <div class="clabel">KMBox Net — UDP</div>
       <label style="font-size:.64rem;color:var(--mu);display:block;margin-bottom:5px;text-transform:uppercase;">IP Address</label>
       <input type="text" id="km-ip" placeholder="192.168.2.188" style="margin-bottom:8px;">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:9px;">
         <div>
           <label style="font-size:.64rem;color:var(--mu);display:block;margin-bottom:4px;text-transform:uppercase;">Port</label>
-          <input type="text" id="km-port" placeholder="8808">
+          <input type="text" id="km-port" placeholder="57856">
         </div>
         <div>
           <label style="font-size:.64rem;color:var(--rd);display:block;margin-bottom:4px;text-transform:uppercase;">UUID ★ จำเป็น</label>
-          <input type="text" id="km-uuid" placeholder="4BD95C53" style="border-color:#3a1820;">
+          <input type="text" id="km-uuid" placeholder="3AC07019" style="border-color:#3a1820;">
         </div>
       </div>
       <div class="row">
@@ -1199,8 +1350,8 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div id="km-msg" style="margin-top:7px;font-size:.7rem;color:var(--mu);min-height:1.2em;font-family:var(--mo)"></div>
       <div class="hint" style="margin-top:8px;line-height:1.9">
         UUID หาได้จาก <strong>KMBox Client → Device Info</strong><br>
-        Port ปกติ: <span style="color:var(--ac);font-family:var(--mo)">8808</span><br>
-        Library: <span style="color:var(--yl);font-family:var(--mo)">pip install kmNet</span>
+        Port: ดูจากหน้าจอ KMBox device โดยตรง<br>
+        ไม่ต้องติดตั้ง library ใด — ใช้ UDP ตรง
       </div>
     </div>
 
@@ -1408,6 +1559,21 @@ $('tbs').onchange = ()=>
   fetch('/toggle-button',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({button:$('tbs').value})});
 
+// ── Beep toggle ───────────────────────────────────────────────────────────────
+let beepEnabled = true;
+function updateBeepBtn() {
+  const b = $('beep-btn');
+  b.textContent  = beepEnabled ? '🔔' : '🔕';
+  b.style.color  = beepEnabled ? 'var(--ac)' : 'var(--mu)';
+  b.style.borderColor = beepEnabled ? '#1a5535' : 'var(--bd2)';
+}
+$('beep-btn').onclick = ()=>{
+  beepEnabled = !beepEnabled;
+  updateBeepBtn();
+  fetch('/beep',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:beepEnabled})});
+};
+
 // ── BUG FIX: Rapid Fire pill — ส่ง interval_ms ทุกครั้งที่กด pill ──────────────
 let rfEnabled = false;
 function syncRF() {
@@ -1458,7 +1624,7 @@ function getStatus() {
     setBtn(d.is_enabled);
     if(d.toggle_button) $('tbs').value=d.toggle_button;
     if(d.trigger_mode)  $('trig').value=d.trigger_mode;
-    if(d.controller_type){ $('ctrl').value=d.controller_type; ctrlUI(d.controller_type,d.ctrl_connected,d.kmnet_installed); }
+    if(d.controller_type){ $('ctrl').value=d.controller_type; ctrlUI(d.controller_type,d.ctrl_connected); }
     if(d.current_config_file) $('cfg-badge').textContent=d.current_config_file.replace('.json','');
     if(d.jitter_strength!==undefined){ $('js').value=d.jitter_strength; $('jv').textContent=(+d.jitter_strength).toFixed(2); }
     if(d.smooth_factor  !==undefined){ $('ss').value=d.smooth_factor;   $('sv2').textContent=(+d.smooth_factor).toFixed(2); }
@@ -1502,13 +1668,17 @@ function getStatus() {
       if(d.hip_pull_down  !==undefined && _lastFocusedInput!=='hf-pd') $('hf-pd').value=d.hip_pull_down;
       if(d.hip_horizontal !==undefined && _lastFocusedInput!=='hf-hz') $('hf-hz').value=d.hip_horizontal;
     }
+    // beep sync
+    if(d.beep_enabled!==undefined && d.beep_enabled!==beepEnabled){
+      beepEnabled=d.beep_enabled; updateBeepBtn();
+    }
   }).catch(()=>{});
 }
 getStatus();
 setInterval(getStatus, 1000);
 
 // ── Controller ────────────────────────────────────────────────────────────────
-function ctrlUI(ct, connected, kmnetInstalled) {
+function ctrlUI(ct, connected) {
   $('kmbox-card').style.display = ct==='kmbox'    ? 'block':'none';
   $('sw-card').style.display    = ct==='software' ? 'block':'none';
   const M={makcu:['mk','MAKCU 2-PC'],kmbox:['km','KMBox / kmNet'],software:['sw','Software 1-PC']};
@@ -1518,22 +1688,18 @@ function ctrlUI(ct, connected, kmnetInstalled) {
     $('sw-status').textContent=connected?'✓ Ready — SendInput active':'✗ Not Ready (Windows only)';
     $('sw-status').style.color=connected?'var(--ac)':'var(--rd)';
   }
-  if(ct==='kmbox' && kmnetInstalled!==undefined){
-    $('kmnet-warn').style.display = kmnetInstalled ? 'none' : 'block';
-  }
 }
 $('ctrl').onchange=()=>{
   const ct=$('ctrl').value;
   fetch('/controller-type',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({controller:ct})})
-    .then(r=>r.json()).then(d=>ctrlUI(ct, false, d.kmnet_installed ?? undefined))
-    .catch(()=>ctrlUI(ct,false));
+    .then(()=>ctrlUI(ct,false));
 };
 $('trig').onchange=()=>
   fetch('/trigger-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:$('trig').value})});
 
 const kmsg=(t,c)=>{$('km-msg').textContent=t;$('km-msg').style.color=c||'var(--mu)';};
 $('km-save').onclick=()=>{
-  const ip=$('km-ip').value.trim(),port=+$('km-port').value||8808,uuid=$('km-uuid').value.trim().replace(/-/g,'').replace(/ /g,'');
+  const ip=$('km-ip').value.trim(),port=+$('km-port').value||57856,uuid=$('km-uuid').value.trim().replace(/-/g,'').replace(/ /g,'');
   if(!ip){kmsg('กรุณากรอก IP','var(--rd)');return;}
   if(uuid.length<8){kmsg('กรุณากรอก UUID (เช่น 4BD95C53)','var(--rd)');return;}
   fetch('/kmbox-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,port,uuid})})
