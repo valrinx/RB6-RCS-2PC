@@ -1,18 +1,18 @@
 """
 RVN — Recoil Control System  v5.2
 Bug fixes from v5.1:
-  • FIX BUG 1: Rapid Fire ทำงานถูกต้องสำหรับปืน semi —
-    กด LMB ค้าง → spam click_lmb() ด้วย interval ที่ตั้ง
-    ข้าม RCS (pull down) ทั้งหมดเมื่อ RF เปิด เพราะปืน semi ยิงทีละนัด
-    ไม่มี recoil ต่อเนื่อง
-    ใช้ raw_lmb โดยตรง — GetAsyncKeyState/MAKCU callback อ่าน physical
-    hardware ไม่ได้รับผลกระทบจาก click_lmb() synthetic ของตัวเอง
-  • FIX BUG 2a: Browse config โหลดปืนแล้ว RCS/Rapid ไม่ทำงาน — cfgdd.onchange
-    ไม่ได้เรียก sendHF() หลัง set hip fire values → server ยังมีค่า hip=0
-  • FIX BUG 2b: cfgdd.onchange เรียก sendAll() ก่อน DOM update เสร็จ
-    แก้: ใช้ setTimeout(0) ให้ JS event loop commit ค่า input ก่อน
-  • FIX BUG 2c: getStatus() overwrite hf-pd/hf-hz ทุก 1 วินาทีด้วยค่าเก่าจาก
-    server — แก้: suppress overwrite 3 วินาทีหลัง load config (_lastConfigLoad)
+  • FIX BUG 1: Rapid Fire works correctly for semi-auto guns —
+    Hold LMB → spam click_lmb() with interval set
+    Skip all RCS (pull down) when RF is open because semi-auto guns shoot one round at a time
+    No continuous recoil
+    Use raw_lmb directly — GetAsyncKeyState/MAKCU callback reads physical
+    hardware not affected by click_lmb() synthetic
+  • FIX BUG 2a: Browse config load gun then RCS/Rapid doesn't work — cfgdd.onchange
+    Didn't call sendHF() after setting hip fire values → server still has hip=0
+  • FIX BUG 2b: cfgdd.onchange call sendAll() before DOM update is complete
+    Fix: use setTimeout(0) to let JS event loop commit input values
+  • FIX BUG 2c: getStatus() overwrite hf-pd/hf-hz every 1 second with old values
+    from server — suppress overwrite 3 seconds after load config (_lastConfigLoad)
 """
 
 import threading
@@ -136,18 +136,25 @@ class SoftwareController:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  KMBoxController  — ใช้ kmNet library (เหมือน ignEvade colorbot)
-#  pip install kmNet
+#  KMBoxController  — ใช้ kmNet library (pip install kmNet)
 # ══════════════════════════════════════════════════════════════════════════════
-try:
-    import kmNet as _kmNet
-    _HAS_KMNET = True
-except ImportError:
-    _HAS_KMNET = False
-    _kmNet = None
+
+# lazy import — จะลอง import จริงตอน connect() เพื่อรองรับ pip install หลังรัน
+_kmNet     = None
+_HAS_KMNET = False
+
+def _try_import_kmnet():
+    """Try to import kmNet with different names — return module or None"""
+    for name in ("kmNet", "kmnet", "kmbox"):
+        try:
+            import importlib
+            mod = importlib.import_module(name)
+            return mod
+        except ImportError:
+            continue
+    return None
 
 class KMBoxController:
-    # mask สำหรับ kmNet.isdown() — ตรงกับ KMBox button bitmask
     _BTN_MASK = {"LMB": 1, "RMB": 2, "MMB": 4, "M4": 8, "M5": 16}
 
     def __init__(self):
@@ -155,43 +162,63 @@ class KMBoxController:
         self._lock        = threading.Lock()
         self._btn_cache: dict = {k: False for k in self._BTN_MASK}
         self._poll_thread: threading.Thread | None = None
+        # throttle: ไม่ print error ซ้ำๆ ทุก 0.5 วินาที
+        self._last_err_print = 0.0
+        self._no_lib_logged  = False
 
     def is_connected(self): return self._connected
 
     def connect(self):
+        global _kmNet, _HAS_KMNET
+        # lazy import — ลอง import ทุกครั้งที่ connect เพื่อรองรับ pip install ระหว่างรัน
         if not _HAS_KMNET:
-            print("[KMBox] kmNet library ไม่ได้ติดตั้ง — รัน: pip install kmNet")
-            return False
+            mod = _try_import_kmnet()
+            if mod:
+                _kmNet     = mod
+                _HAS_KMNET = True
+                self._no_lib_logged = False
+                print("[KMBox] kmNet ready")
+            else:
+                # print เตือนแค่ครั้งแรก ไม่ spam
+                if not self._no_lib_logged:
+                    print("[KMBox] kmNet not found — run: pip install kmNet  then restart")
+                    self._no_lib_logged = True
+                return False
+
         cfg  = app_state.get_kmbox_config()
         ip   = cfg["ip"].strip()
         port = str(cfg["port"]) if cfg["port"] else "8808"
         uuid = cfg["uuid"].replace("-", "").replace(" ", "").upper()
         if len(uuid) < 8:
-            print("[KMBox] UUID ไม่ถูกต้อง — ต้องการ 8 hex chars เช่น 4BD95C53")
+            now = time.perf_counter()
+            if now - self._last_err_print > 10:
+                print("[KMBox] UUID is incorrect — must be 8 hex chars like F2083CAB")
+                self._last_err_print = now
             return False
         try:
-            # kmNet.init(ip, port, uuid) — เหมือน ignEvade ใช้
             _kmNet.init(ip, port, uuid[:8])
             self._connected = True
+            self._no_lib_logged = False
             print(f"[KMBox/kmNet] Connected → {ip}:{port} uuid={uuid[:8]}")
             self.StartButtonListener()
             return True
         except Exception as e:
-            print(f"[KMBox/kmNet] init error: {e}")
+            now = time.perf_counter()
+            if now - self._last_err_print > 5:
+                print(f"[KMBox/kmNet] Connect error: {e}")
+                self._last_err_print = now
             self._connected = False
             return False
 
     def disconnect(self):
         self._connected = False
-        # kmNet ไม่มี explicit disconnect — set flag เพื่อหยุด poll thread
 
     def StartButtonListener(self):
         if self._poll_thread and self._poll_thread.is_alive(): return
         def _poll():
             while self._connected:
                 try:
-                    # kmNet.isdown(mask) คืน 1 ถ้ากดอยู่
-                    state_raw = _kmNet.isdown(0)  # 0 = รวมทุก button
+                    state_raw = _kmNet.isdown(0)
                     with self._lock:
                         for btn, mask in self._BTN_MASK.items():
                             self._btn_cache[btn] = bool(state_raw & mask)
@@ -215,9 +242,9 @@ class KMBoxController:
     def click_lmb(self):
         if not self._connected: return
         try:
-            _kmNet.left(1)   # กด
+            _kmNet.left(1)
             time.sleep(0.01)
-            _kmNet.left(0)   # ปล่อย
+            _kmNet.left(0)
         except Exception as e:
             print(f"[KMBox/kmNet] click error: {e}")
             self._connected = False
@@ -532,6 +559,10 @@ def mouse_control_loop():
 
     # Rapid fire state
     last_rf_click  = 0.0
+    # retry backoff — ไม่ spam connect เมื่อ library หาย / UUID ผิด
+    _retry_delay   = 0.5
+    _last_connect_attempt = 0.0
+    _last_ctrl_key = None
 
     while True:
         t0 = time.perf_counter()
@@ -539,12 +570,24 @@ def mouse_control_loop():
             ctrl     = get_active_controller()
             ctrl_key = app_state.get_controller_type()
 
+            # reset backoff เมื่อ user เปลี่ยน controller type
+            if ctrl_key != _last_ctrl_key:
+                _retry_delay  = 0.5
+                _last_ctrl_key = ctrl_key
+
             if not ctrl.is_connected():
-                time.sleep(0.5)
-                ok = ctrl.connect()
-                if ok and not _listener_started[ctrl_key]:
-                    ctrl.StartButtonListener()
-                    _listener_started[ctrl_key] = True
+                now = time.perf_counter()
+                if now - _last_connect_attempt >= _retry_delay:
+                    _last_connect_attempt = now
+                    ok = ctrl.connect()
+                    if ok:
+                        _retry_delay = 0.5
+                        if not _listener_started[ctrl_key]:
+                            ctrl.StartButtonListener()
+                            _listener_started[ctrl_key] = True
+                    else:
+                        _retry_delay = min(_retry_delay * 2, 10.0)
+                time.sleep(0.1)
                 continue
 
             if not _listener_started[ctrl_key]:
