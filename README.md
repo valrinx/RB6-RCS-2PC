@@ -1,61 +1,126 @@
 # RVN — Recoil Control System
 
 > [!CAUTION]
-> This program does **not** automatically adjust for your DPI, in-game sensitivity, Windows mouse speed, or any other settings. You must manually tune the values to match your setup.
+> This program does not automatically account for your DPI, sensitivity, Windows mouse speed, or any other settings. You will need to tune the values manually to match your setup.
 
 > [!IMPORTANT]
-> The new MAKCU (makcu) will include built-in advanced RCS, which may eventually make this tool obsolete for MAKCU users.  
-> **Software Direct mode** (1-PC, no hardware) remains fully supported.
+> The MAKXD (new makcu) will have built-in advanced RCS, which may eventually make this tool obsolete for makcu users. Software Direct mode (1-PC, no hardware) is still fully supported.
 
 > [!NOTE]
 > **RVN — Recoil Control System v5.5**
-
+>
 > **Changes from v5.4:**
-> - **FIX:** Trigger mode "LMB Only" now works correctly in hold-to-fire mode.  
->   (Previously, cached button state was polluted by Rapid Fire synthetic clicks, causing stuck states.)
-> - Main loop now reads physical LMB the same way as the Rapid Fire worker (more reliable detection).
+> - **FIX:** Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
+>    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
+> -  The main loop now reads physical LMB the same way as the RF worker.
+    
+A game-agnostic recoil control script with a web UI. Supports MAKCU, KMBox, and Software Direct (no hardware, 1-PC).
 
-A **game-agnostic** recoil control script with a clean web-based UI.  
-Supports **MAKCU**, **KMBox Net/Pro**, and **Software Direct** (single PC, no hardware).
-
-Works with any game — Rainbow Six Siege, Rust, CS2, Valorant, Apex Legends, etc.
+Works with any game — R6, Rust, CS2, Valorant, or anything else.
 
 ## Features
 
-- **Vertical pull-down** with configurable Delay and Duration
-- **Horizontal compensation** (left/right) with Delay and Duration
-- **Recoil Curve Editor** — draw custom pull patterns per weapon  
-  - **Decay** mode: generates a realistic decaying curve  
-  - **Flat** mode: straight line matching the constant value  
-  - When the curve ends, it automatically falls back to the constant value
-- **Rapid Fire** — auto-clicks LMB at a set interval (great for semi-auto weapons)  
-  **→ Now works together with RCS** (recoil compensation still applies during rapid fire)
-- **Hip Fire Override** — separate pull-down and horizontal values when firing **without ADS** (RMB not held)
-- **Humanization** — Jitter (Gaussian noise) + Exponential Smoothing to make movement less detectable
-- **Flexible config system** — save/load configs with free-form tags (`game`, `attach`, `scope`, `grip`, etc.)
-- **Tag-based browsing** — filter saved configs by tags or search by name/tag
-- **Multiple controller support** — MAKCU, KMBox Net/Pro, or Software Direct
-- **Multi-profile support** — separate `.json` files per game or loadout
-- **Web UI** — accessible from your phone or a second PC on the same network
-
-## Important Changes in v5.5
-
-- Rapid Fire and Recoil Control can now run **simultaneously**
-- Much more reliable physical LMB detection (especially in "LMB Only" + Rapid Fire scenarios)
-- Fixed button state issues that previously caused stuck firing states
+- **Vertical pull-down** with Delay and Duration timing
+- **Horizontal compensation** with Delay and Duration timing
+- **Recoil Curve editor** — draw a custom pull pattern per gun
+  - **Decay** — generates a realistic decaying curve from the constant value
+  - **Flat** — sets the curve to a straight line matching the constant value
+  - When the curve runs out, falls back to the constant value automatically
+- **Rapid Fire** — auto-clicks LMB at a set interval (for semi-auto weapons)
+- **Hip Fire override** — separate pull-down and horizontal values when not ADS
+- **Humanization** — Jitter + Exponential Smoothing to reduce pattern detection
+- **Game-agnostic config system** — save configs with free-form tags (`game`, `attach`, `scope`, etc.)
+- **Tag-based browsing** — filter saved configs by any tag; search by name or tag
+- **Multiple controller support** — MAKCU, KMBox Net/Pro, or Software Direct (1-PC)
+- **Multi-profile system** — separate `.json` files per game or loadout
+- Web UI accessible from phone or second PC on the same network
 
 ## Requirements
 
 - Python 3.10+
-- One of the following:
-  - MAKCU (2-PC hardware)
-  - KMBox Net or Pro (2-PC hardware)
-  - **Software Direct** (1-PC only — uses Windows SendInput, **may be detected by anti-cheat**)
+- One of:
+  - A MAKCU (2-PC hardware)
+  - A KMBox Net or Pro (2-PC hardware)
+  - Nothing — Software Direct mode works on a single PC (no Anti-Cheat bypass)
 
 ## Setup
 
-1. Download the release
-2. Install dependencies:
+Download the release, then install dependencies:
 
 ```bash
 pip install -r requirements.txt
+```
+
+If accessing from another device on your network, allow port 8000 through Windows Firewall (run in PowerShell as admin):
+
+```powershell
+New-NetFirewallRule -DisplayName "RVN Port 8000" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8000
+```
+
+## Usage
+
+Double-click `rvn_v5.py`, or run in terminal:
+
+```bash
+python rvn_v5.py
+```
+
+The console will print the URLs to open:
+
+```
+  Local  : http://localhost:8000
+  Network: http://192.168.x.x:8000
+```
+
+Open that URL in any browser — works from your phone too.
+
+## Controls
+
+| Setting | Description |
+|---|---|
+| **Vertical (Pull-down)** | How much the mouse pulls down per tick while firing |
+| **Vertical Delay** | How long after firing starts before vertical kicks in (ms) |
+| **Vertical Duration** | How long vertical lasts — 0 = forever |
+| **Horizontal** | Left/right compensation (negative = left, positive = right) |
+| **Horizontal Delay** | How long before horizontal kicks in (ms) |
+| **Horizontal Duration** | How long horizontal lasts — 0 = forever |
+| **Recoil Curve** | Draw a custom pull pattern — overrides the constant value while the curve lasts, then falls back to the constant |
+| **Rapid Fire** | Auto-click LMB at a fixed interval — for semi-auto weapons; disables RCS pull-down while active |
+| **Hip Fire** | Separate pull-down and horizontal values used when firing without ADS (no RMB held) |
+| **Jitter** | Gaussian noise per tick to randomize movement slightly |
+| **Smooth** | Exponential smoothing — higher = softer, more natural movement |
+| **Toggle key** | M4, M5, or Middle Mouse — toggles recoil on/off in-game |
+| **Trigger mode** | LMB only, or LMB + RMB (fire + ADS simultaneously) |
+
+## Saving Configs
+
+Configs are saved per profile (`.json` file). Each config has:
+
+- **Name** — any name you want (e.g. `AK47`, `MP5K Comp`)
+- **Tags** — optional key:value pairs for filtering (e.g. `game:Rust`, `attach:Compensator`)
+
+The browse dropdown shows only the gun name and pull-down value for a clean look. Hover over an entry to see its full tags, or use the search bar to filter by name or tag.
+
+Example tags for different games:
+
+```
+# Rust
+game:Rust   attach:Comp   scope:2x
+
+# R6
+game:R6   op:Ash   attach:Flash
+
+# CS2
+game:CS2   attach:Silencer
+```
+
+Configs are stored in the `configs/` folder as `.json` files. Create separate profiles per game from the Settings → Profile panel.
+
+## Accessing from Another Device
+
+Both devices must be on the same network (same Wi-Fi or LAN). Use the Network IP shown in the console, on port 8000.
+
+## Contributors
+
+- secretlay3r — code cleanup
+- blainsage — firewall tip (port 8000)
