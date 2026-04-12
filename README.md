@@ -9,12 +9,12 @@
 > [!NOTE]
 > Windows mouse sensitivity should be left at the default (6/11) for accurate results.
 
-> [UPDATE]
+> [!UPDATE]
 > RVN — Recoil Control System  v5.5
-Changes from v5.4:
-  • FIX: Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
-    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
-    The main loop now reads physical LMB the same way as the RF worker.
+>Changes from v5.4:
+>  • FIX: Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
+>    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
+>    The main loop now reads physical LMB the same way as the RF worker.
     
 A game-agnostic recoil control script with a web UI. Supports MAKCU, KMBox, and Software Direct (no hardware, 1-PC).
 
