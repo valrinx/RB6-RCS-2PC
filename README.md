@@ -9,6 +9,13 @@
 > [!NOTE]
 > Windows mouse sensitivity should be left at the default (6/11) for accurate results.
 
+> [!UPDATE]
+> RVN — Recoil Control System  v5.5
+Changes from v5.4:
+  • FIX: Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
+    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
+    The main loop now reads physical LMB the same way as the RF worker.
+    
 A game-agnostic recoil control script with a web UI. Supports MAKCU, KMBox, and Software Direct (no hardware, 1-PC).
 
 Works with any game — R6, Rust, CS2, Valorant, or anything else.
@@ -44,7 +51,6 @@ Download the release, then install dependencies:
 
 ```bash
 pip install -r requirements.txt
-pip install kmNet
 ```
 
 If accessing from another device on your network, allow port 8000 through Windows Firewall (run in PowerShell as admin):
