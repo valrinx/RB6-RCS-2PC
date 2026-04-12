@@ -122,18 +122,17 @@ class SoftwareController:
             print(f"[Software] move error: {e}")
 
     def click_lmb(self):
-        """RF click: ส่ง LEFTDOWN+LEFTUP ผ่าน SendInput
-        RF worker อ่าน GetAsyncKeyState โดยตรง (ไม่ผ่าน btn[] cache)
-        ดังนั้น synthetic LEFTUP ไม่กระทบ physical state check ของ worker"""
         if not self._ready: return
         try:
             import ctypes as _ct
             inp_down = self._INPUT(type=0)
-            inp_down.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0, dwFlags=self.MOUSEEVENTF_LEFTDOWN, time=0, dwExtraInfo=None)
+            inp_down.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0,
+                dwFlags=self.MOUSEEVENTF_LEFTDOWN, time=0, dwExtraInfo=None)
             self._user32.SendInput(1, _ct.byref(inp_down), self._INPUT_sz)
             time.sleep(0.010)
             inp_up = self._INPUT(type=0)
-            inp_up.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0, dwFlags=self.MOUSEEVENTF_LEFTUP, time=0, dwExtraInfo=None)
+            inp_up.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0,
+                dwFlags=self.MOUSEEVENTF_LEFTUP, time=0, dwExtraInfo=None)
             self._user32.SendInput(1, _ct.byref(inp_up), self._INPUT_sz)
         except Exception as e:
             print(f"[Software] click error: {e}")
@@ -670,65 +669,26 @@ def mouse_control_loop():
     _last_connect_attempt = 0.0
     _last_ctrl_key        = None
 
-    # ── Rapid Fire Worker — AHK-style ───────────────────────────────────────
-    #
-    # อ้างอิงจาก AHK Script 1:
-    #   LButton::
-    #   while GetKeyState("LButton", "P") {  ; P = physical only
-    #       Click, left
-    #   }
-    #
-    # หลักการ: RF worker อ่าน physical LMB state ด้วยตัวเองโดยตรง
-    # ไม่พึ่ง main loop, ไม่พึ่ง btn[] cache ที่ถูก synthetic LEFTUP ทำให้เสีย
-    # Software mode: ใช้ ctypes GetAsyncKeyState โดยตรงใน worker
-    # KMBox/MAKCU mode: อ่าน btn_cache ที่ monitor thread อัปเดต (ไม่มีปัญหา synthetic)
-    #
-    def _read_lmb_physical():
-        """อ่าน physical LMB state โดยตรง — ใช้เฉพาะใน RF worker"""
-        ctrl = get_active_controller()
-        ct = app_state.get_controller_type()
-        if ct == "software":
-            # อ่านตรงจาก Windows API ข้าม btn[] cache ที่อาจเสียจาก synthetic
-            try:
-                import ctypes
-                return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
-            except Exception:
-                return False
-        else:
-            # KMBox/MAKCU: btn_cache อัปเดตจาก hardware โดยตรง ไม่มีปัญหา synthetic
-            return ctrl.get_button_state("LMB")
+    # ── Rapid Fire Worker ────────────────────────────────────────────────────
+    # ใช้ threading.Event — main loop เป็นคน set/clear
+    # RF worker ไม่อ่าน LMB state เองเลย หลีกเลี่ยงปัญหา GetAsyncKeyState
+    # กระทบจาก synthetic SendInput(LEFTUP) ที่ click_lmb() ส่ง
+    _rf_event = threading.Event()  # set = กดค้าง, clear = ปล่อย
 
     def _rf_worker():
-        """AHK-style rapid fire:
-        while held: click → sleep(interval) → repeat
-        ไม่มี flag จาก main loop — อ่าน physical state ด้วยตัวเอง
-        """
         while True:
-            try:
-                rf_en, rf_ms = app_state.get_rapid_fire()
-                if not rf_en:
-                    time.sleep(0.020)
-                    continue
-
-                trigger_mode = app_state.get_trigger_mode()
-                lmb = _read_lmb_physical()
-                rmb = get_active_controller().get_button_state("RMB")
-                held = (lmb and rmb) if trigger_mode == "LMB+RMB" else lmb
-
-                if held:
-                    # กำลังกดค้าง → click แล้ว loop ต่อทันที
+            # รอจนกว่า main loop จะ set event (LMB กดค้าง + RF เปิด)
+            _rf_event.wait()
+            # เมื่อ event ถูก set → spam click จนกว่าจะ clear
+            while _rf_event.is_set():
+                try:
+                    _, rf_ms = app_state.get_rapid_fire()
                     get_active_controller().click_lmb()
-                    # sleep interval หลัง click (รวม click_lmb ที่มี sleep 8-10ms ภายใน)
-                    interval = max(0.020, rf_ms / 1000.0)
-                    elapsed = 0.010  # click_lmb ใช้เวลาประมาณ 10ms
-                    remaining = interval - elapsed
-                    if remaining > 0:
-                        time.sleep(remaining)
-                else:
-                    time.sleep(0.005)
-
-            except Exception:
-                time.sleep(0.010)
+                    # sleep interval หักเวลาที่ click_lmb ใช้ (~10ms)
+                    wait_s = max(0.001, rf_ms / 1000.0 - 0.010)
+                    time.sleep(wait_s)
+                except Exception:
+                    time.sleep(0.010)
 
     _rf_thread = threading.Thread(target=_rf_worker, daemon=True, name="RapidFireWorker")
     _rf_thread.start()
@@ -774,6 +734,19 @@ def mouse_control_loop():
 
             raw_lmb = ctrl.get_button_state("LMB")
             rmb     = ctrl.get_button_state("RMB")
+
+            # ── Rapid Fire — main loop set/clear event ──────────────────────
+            # main loop อ่าน LMB จาก poll thread (GetAsyncKeyState) ซึ่งถูกต้อง
+            # เพราะ click_lmb() ทำงานใน RF worker thread แยก ไม่ใช่ใน main loop
+            # ดังนั้น GetAsyncKeyState ใน poll thread ไม่ถูก block โดย synthetic LEFTUP
+            # (synthetic LEFTUP และ GetAsyncKeyState อยู่คนละ thread → timing ต่างกัน)
+            rf_en, _ = app_state.get_rapid_fire()
+            trigger_mode = app_state.get_trigger_mode()
+            rf_held = (raw_lmb and rmb) if trigger_mode == "LMB+RMB" else raw_lmb
+            if rf_en and rf_held:
+                _rf_event.set()
+            else:
+                _rf_event.clear()
 
             lmb = raw_lmb
 
