@@ -1,18 +1,9 @@
 """
-RVN — Recoil Control System  v5.2
-Bug fixes from v5.1:
-  • FIX BUG 1: Rapid Fire ทำงานถูกต้องสำหรับปืน semi —
-    กด LMB ค้าง → spam click_lmb() ด้วย interval ที่ตั้ง
-    ข้าม RCS (pull down) ทั้งหมดเมื่อ RF เปิด เพราะปืน semi ยิงทีละนัด
-    ไม่มี recoil ต่อเนื่อง
-    ใช้ raw_lmb โดยตรง — GetAsyncKeyState/MAKCU callback อ่าน physical
-    hardware ไม่ได้รับผลกระทบจาก click_lmb() synthetic ของตัวเอง
-  • FIX BUG 2a: Browse config โหลดปืนแล้ว RCS/Rapid ไม่ทำงาน — cfgdd.onchange
-    ไม่ได้เรียก sendHF() หลัง set hip fire values → server ยังมีค่า hip=0
-  • FIX BUG 2b: cfgdd.onchange เรียก sendAll() ก่อน DOM update เสร็จ
-    แก้: ใช้ setTimeout(0) ให้ JS event loop commit ค่า input ก่อน
-  • FIX BUG 2c: getStatus() overwrite hf-pd/hf-hz ทุก 1 วินาทีด้วยค่าเก่าจาก
-    server — แก้: suppress overwrite 3 วินาทีหลัง load config (_lastConfigLoad)
+# RVN — Recoil Control System  v5.5
+Changes from v5.4:
+  • FIX: Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
+    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
+    The main loop now reads physical LMB the same way as the RF worker.
 """
 
 import threading
@@ -112,6 +103,16 @@ class SoftwareController:
     def get_button_state(self, btn):
         with self._lock: return self._btn.get(btn, False)
 
+    def get_physical_lmb(self):
+        """Read LMB via GetAsyncKeyState directly — bypasses cache.
+        Used by the RF worker to detect physical hold/release
+        even while RF is sending synthetic LEFTUP events."""
+        if not self._ready: return False
+        try:
+            return bool(self._user32.GetAsyncKeyState(self._VK["LMB"]) & 0x8000)
+        except Exception:
+            return False
+
     def simple_move_mouse(self, x, y):
         if not self._ready or (x == 0 and y == 0): return
         try:
@@ -121,21 +122,24 @@ class SoftwareController:
         except Exception as e:
             print(f"[Software] move error: {e}")
 
-    def click_lmb(self):
+    def _send_lmb(self, flag):
         if not self._ready: return
         try:
-            import ctypes as _ct
-            inp_down = self._INPUT(type=0)
-            inp_down.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0,
-                dwFlags=self.MOUSEEVENTF_LEFTDOWN, time=0, dwExtraInfo=None)
-            self._user32.SendInput(1, _ct.byref(inp_down), self._INPUT_sz)
-            time.sleep(0.010)
-            inp_up = self._INPUT(type=0)
-            inp_up.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0,
-                dwFlags=self.MOUSEEVENTF_LEFTUP, time=0, dwExtraInfo=None)
-            self._user32.SendInput(1, _ct.byref(inp_up), self._INPUT_sz)
+            inp = self._INPUT(type=0)
+            inp.mi = self._MOUSEINPUT(dx=0, dy=0, mouseData=0,
+                dwFlags=flag, time=0, dwExtraInfo=None)
+            self._user32.SendInput(1, ctypes.byref(inp), self._INPUT_sz)
         except Exception as e:
-            print(f"[Software] click error: {e}")
+            print(f"[Software] lmb error: {e}")
+
+    def lmb_down(self): self._send_lmb(self.MOUSEEVENTF_LEFTDOWN)
+    def lmb_up(self):   self._send_lmb(self.MOUSEEVENTF_LEFTUP)
+
+    def click_lmb(self):
+        """DOWN → 10ms → UP  (only outside RF path)"""
+        self.lmb_down()
+        time.sleep(0.010)
+        self.lmb_up()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -174,10 +178,10 @@ class KMBoxController:
         self._mac             = b'\x00'*4
         self._rand            = 0
         self._seq             = 0
-        self._send_lock       = threading.Lock()  # สำหรับส่ง packet (move/click)
-        self._seq_lock        = threading.Lock()  # สำหรับ seq counter
-        self._btn_lock        = threading.Lock()  # สำหรับ btn_cache
-        self._click_lock      = threading.Lock()  # แยกสำหรับ click_lmb โดยเฉพาะ — ป้องกัน block กับ monitor
+        self._send_lock       = threading.Lock()  # sending packets (move/click)
+        self._seq_lock        = threading.Lock()  # sequence counter
+        self._btn_lock        = threading.Lock()  # btn_cache
+        self._click_lock      = threading.Lock()  # click_lmb only — avoids blocking monitor
         self._btn_cache: dict = {k: False for k in self._BTN}
         self._monitor_thread: threading.Thread | None = None
         self._last_err        = 0.0
@@ -191,13 +195,13 @@ class KMBoxController:
         uuid = cfg["uuid"].replace("-","").replace(" ","").upper()
 
         if len(uuid) < 8:
-            print("[KMBox] UUID ไม่ถูกต้อง — ต้องการ 8 hex chars เช่น F2083CAB")
+            print("[KMBox] Invalid UUID — need 8 hex chars e.g. F2083CAB")
             return False
         try:
             uuid_int  = int(uuid[:8], 16)
             self._mac = _struct.pack('<I', uuid_int)
         except ValueError:
-            print(f"[KMBox] UUID ไม่ใช่ hex: {uuid!r}")
+            print(f"[KMBox] UUID is not valid hex: {uuid!r}")
             return False
 
         with self._send_lock:
@@ -224,8 +228,8 @@ class KMBoxController:
                 print(f"[KMBox] Handshake OK — {len(resp)} bytes from {addr}: {resp.hex()[:24]}")
             except socket.timeout:
                 sock.close()
-                print(f"[KMBox] Timeout — device ไม่ตอบสนอง")
-                print(f"[KMBox] ตรวจสอบ: IP={ip}, Port={port}, UUID={uuid[:8]}")
+                print(f"[KMBox] Timeout — device did not respond")
+                print(f"[KMBox] Check: IP={ip}, Port={port}, UUID={uuid[:8]}")
                 self._connected = False
                 return False
 
@@ -238,13 +242,13 @@ class KMBoxController:
             return True
 
         except socket.timeout:
-            print(f"[KMBox] Timeout — device ไม่ตอบสนอง IP:{ip} Port:{port}")
+            print(f"[KMBox] Timeout — device did not respond IP:{ip} Port:{port}")
             self._connected = False
             return False
         except Exception as e:
             now = time.perf_counter()
             if now - self._last_err > 5:
-                print(f"[KMBox] เชื่อมต่อไม่ได้: {e}")
+                print(f"[KMBox] Connection failed: {e}")
                 self._last_err = now
             self._connected = False
             return False
@@ -262,7 +266,7 @@ class KMBoxController:
         def _poll():
             while self._connected:
                 for btn, mask in self._BTN.items():
-                    # monitor ใช้ send_lock แยกกับ btn_lock
+                    # monitor uses send_lock separate from btn_lock
                     with self._send_lock:
                         if not self._sock: break
                         try:
@@ -299,19 +303,19 @@ class KMBoxController:
                 self._connected = False
 
     def click_lmb(self):
-        """LMB click — ใช้ click_lock แยกจาก send_lock เพื่อไม่ block กับ monitor thread
-        ทำให้ rapid fire click ไม่ต้องรอ monitor poll 8ms ก่อนทุกครั้ง"""
+        """LMB click — click_lock separate from send_lock so monitor thread is not blocked,
+        so rapid-fire clicks do not wait ~8ms monitor poll every time."""
         if not self._connected: return
         with self._click_lock:
             if not self._sock: return
             try:
-                # กด LMB
+                # press LMB
                 self._sock.sendto(
                     self._build(self.CMD_CLICK, _struct.pack('<BB', 1, 0)),
                     (self._ip, self._port)
                 )
                 time.sleep(0.008)
-                # ปล่อย LMB
+                # release LMB
                 self._sock.sendto(
                     self._build(self.CMD_CLICK, _struct.pack('<BB', 0, 0)),
                     (self._ip, self._port)
@@ -321,7 +325,7 @@ class KMBoxController:
                 self._connected = False
 
     def _build(self, cmd: int, payload: bytes) -> bytes:
-        """สร้าง 64-byte KMBox Net packet — thread-safe seq counter"""
+        """Build 64-byte KMBox Net packet — thread-safe sequence counter."""
         with self._seq_lock:
             self._seq += 1
             seq = self._seq
@@ -443,21 +447,21 @@ class HipFireConfig(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Beep helper ──────────────────────────────────────────────────────────────
 def _play_beep(enabled: bool):
-    """เล่นเสียง beep น่ารักตอน toggle — ใช้ winsound บน Windows, fallback เป็น print"""
+    """Short beep on toggle — winsound on Windows, otherwise silent."""
     try:
         import winsound
         if enabled:
-            # ON: สองโน้ตสั้นขึ้น (ไพเราะ)
+            # ON: two rising notes
             winsound.Beep(880, 60)
             time.sleep(0.04)
             winsound.Beep(1320, 80)
         else:
-            # OFF: สองโน้ตสั้นลง
+            # OFF: two falling notes
             winsound.Beep(880, 60)
             time.sleep(0.04)
             winsound.Beep(587, 80)
     except Exception:
-        pass   # non-Windows หรือไม่มี audio → เงียบ
+        pass   # non-Windows or no audio — silent
 
 
 class AppState:
@@ -473,7 +477,7 @@ class AppState:
         self.jitter_strength         = 0.15
         self.smooth_factor           = 0.60
         self.is_enabled              = False
-        self.beep_enabled            = True   # เสียง beep ตอน toggle on/off
+        self.beep_enabled            = True   # beep on toggle on/off
         self.toggle_button           = "M5"
         self.current_config_file     = DEFAULT_CONFIG_FILE
         self.trigger_mode            = "LMB"
@@ -533,7 +537,7 @@ class AppState:
             state = self.is_enabled
             beep  = self.beep_enabled
         if beep:
-            # beep ใน thread แยกเพื่อไม่บล็อก loop
+            # beep in a separate thread so the loop is not blocked
             threading.Thread(target=_play_beep, args=(state,), daemon=True).start()
         return state
 
@@ -649,6 +653,13 @@ def humanize(rx, ry, jitter, smoother, smooth):
 #  Main control loop
 # ══════════════════════════════════════════════════════════════════════════════
 TICK_S = 0.010
+# Rapid Fire console logs ([RF] activate / click / …) — off by default
+RF_DEBUG = False
+
+
+def _rf_log(msg: str) -> None:
+    if RF_DEBUG:
+        print(msg)
 
 
 @asynccontextmanager
@@ -669,26 +680,163 @@ def mouse_control_loop():
     _last_connect_attempt = 0.0
     _last_ctrl_key        = None
 
-    # ── Rapid Fire Worker ────────────────────────────────────────────────────
-    # ใช้ threading.Event — main loop เป็นคน set/clear
-    # RF worker ไม่อ่าน LMB state เองเลย หลีกเลี่ยงปัญหา GetAsyncKeyState
-    # กระทบจาก synthetic SendInput(LEFTUP) ที่ click_lmb() ส่ง
-    _rf_event = threading.Event()  # set = กดค้าง, clear = ปล่อย
+
+    _rf_lmb_held   = [False]   # shared flag for KMBox/MAKCU
+    _rf_lmb_false_count = [0]  # count consecutive False from hardware poll
+
+    def _rf_lmb_monitor():
+        """Separate thread for KMBox/MAKCU — tracks physical LMB only.
+        Unaffected by click_lmb() because hardware does not see synthetic input."""
+        while True:
+            try:
+                ctrl = get_active_controller()
+                # SoftwareController uses get_physical_lmb() instead
+                if isinstance(ctrl, SoftwareController):
+                    time.sleep(0.020)
+                    continue
+                raw = ctrl.get_button_state("LMB")
+                if raw:
+                    _rf_lmb_held[0] = True
+                    _rf_lmb_false_count[0] = 0
+                else:
+                    _rf_lmb_false_count[0] += 1
+                    # require 3 consecutive False (~24ms) before treating as real release
+                    # avoids false negatives from KMBox monitor poll gaps
+                    if _rf_lmb_false_count[0] >= 3:
+                        _rf_lmb_held[0] = False
+                time.sleep(0.008)
+            except Exception:
+                time.sleep(0.020)
+
+    threading.Thread(target=_rf_lmb_monitor, daemon=True, name="RF_LMB_Monitor").start()
 
     def _rf_worker():
+        # ── v5.5 RF hold mechanic ─────────────────────────────────────────────
+        # LMB+RMB: hold RMB + LMB edge → RF until RMB released
+        # LMB: hold LMB → RF until LMB released
+        # Works alongside RCS — main loop still applies recoil as usual
+        # ─────────────────────────────────────────────────────────────────────
+        _last_click_time = 0.0
+        _click_count     = 0
+        _sw_lmb_down     = False   # track synthetic DOWN/UP for SoftwareController
+
+        # arm/active state
+        _rf_armed      = False
+        _rf_active     = False
+        _prev_lmb      = False
+        _prev_rmb      = False
+
+        def _reset_rf_state():
+            nonlocal _rf_armed, _rf_active, _prev_lmb, _prev_rmb
+            nonlocal _last_click_time, _click_count
+            _rf_armed  = False
+            _rf_active = False
+            _prev_lmb  = False
+            _prev_rmb  = False
+            _last_click_time = 0.0
+            _click_count = 0
+
         while True:
-            # รอจนกว่า main loop จะ set event (LMB กดค้าง + RF เปิด)
-            _rf_event.wait()
-            # เมื่อ event ถูก set → spam click จนกว่าจะ clear
-            while _rf_event.is_set():
-                try:
-                    _, rf_ms = app_state.get_rapid_fire()
-                    get_active_controller().click_lmb()
-                    # sleep interval หักเวลาที่ click_lmb ใช้ (~10ms)
-                    wait_s = max(0.001, rf_ms / 1000.0 - 0.010)
-                    time.sleep(wait_s)
-                except Exception:
-                    time.sleep(0.010)
+            try:
+                rf_en, rf_ms = app_state.get_rapid_fire()
+                if not rf_en:
+                    # RF off — if SW controller left LMB down, send UP first
+                    if _sw_lmb_down:
+                        ctrl = get_active_controller()
+                        if isinstance(ctrl, SoftwareController):
+                            ctrl.lmb_up()
+                        _sw_lmb_down = False
+                    _reset_rf_state()
+                    _rf_lmb_held[0] = False
+                    _rf_lmb_false_count[0] = 0
+                    time.sleep(0.020)
+                    continue
+
+                ctrl         = get_active_controller()
+                trigger_mode = app_state.get_trigger_mode()
+                is_sw        = isinstance(ctrl, SoftwareController)
+
+                # ── Read physical buttons ─────────────────────────────────────
+                # SW: get_physical_lmb() = GetAsyncKeyState directly
+                #     → not affected by synthetic LEFTUP during RF clicks
+                # KMBox/MAKCU: _rf_lmb_held (debounced monitor thread)
+                if is_sw:
+                    lmb_phys = ctrl.get_physical_lmb()
+                else:
+                    lmb_phys = _rf_lmb_held[0]
+
+                rmb = ctrl.get_button_state("RMB")
+
+                # ── Arm / Active logic ────────────────────────────────────────
+                if trigger_mode == "LMB+RMB":
+                    # Behavior:
+                    #   Hold RMB + press LMB (need not be simultaneous) → activate
+                    #   Release RMB → deactivate (LMB state ignored)
+                    #   Release LMB while still holding RMB → deactivate
+
+                    # activate: RMB held + LMB rising edge
+                    if rmb and lmb_phys and not _prev_lmb:
+                        _rf_active = True
+                        _last_click_time = 0.0
+                        _click_count = 0
+                        _rf_log("[RF] activated (LMB edge while RMB held)")
+
+                    if _rf_active:
+                        # deactivate when either button is released
+                        if not rmb or not lmb_phys:
+                            _rf_log(f"[RF] deactivated (lmb={lmb_phys} rmb={rmb}) clicks={_click_count}")
+                            _rf_active = False
+
+                    firing = _rf_active
+
+                else:
+                    # LMB mode: hold LMB → active until release
+                    # Use lmb_phys directly — no edge detect needed
+                    # get_physical_lmb() reads real hardware
+                    # Not disturbed by synthetic UP between clicks
+                    if lmb_phys and not _rf_active:
+                        _rf_active = True
+                        _last_click_time = 0.0
+                        _click_count = 0
+                        _rf_log("[RF] activated (LMB held)")
+
+                    if _rf_active and not lmb_phys:
+                        _rf_log(f"[RF] deactivated (LMB released) clicks={_click_count}")
+                        _rf_active = False
+
+                    firing = _rf_active
+
+                _prev_lmb = lmb_phys
+                _prev_rmb = rmb
+
+                # ── Fire ──────────────────────────────────────────────────────
+                if firing:
+                    now        = time.perf_counter()
+                    interval_s = max(0.030, rf_ms / 1000.0)
+
+                    if now - _last_click_time >= interval_s:
+                        if is_sw:
+                            if _sw_lmb_down:
+                                ctrl.lmb_up()
+                                time.sleep(0.008)
+                            ctrl.lmb_down()
+                            _sw_lmb_down = True
+                        else:
+                            ctrl.click_lmb()
+                        _click_count += 1
+                        _last_click_time = now
+                        _rf_log(f"[RF] click #{_click_count}  interval={rf_ms}ms")
+
+                    time.sleep(0.002)
+                else:
+                    if is_sw and _sw_lmb_down:
+                        ctrl.lmb_up()
+                        _sw_lmb_down = False
+                    time.sleep(0.005)
+
+            except Exception as e:
+                _rf_log(f"[RF] exception: {e}")
+                time.sleep(0.010)
 
     _rf_thread = threading.Thread(target=_rf_worker, daemon=True, name="RapidFireWorker")
     _rf_thread.start()
@@ -699,7 +847,7 @@ def mouse_control_loop():
             ctrl     = get_active_controller()
             ctrl_key = app_state.get_controller_type()
 
-            # reset backoff เมื่อ user เปลี่ยน controller type
+            # reset backoff when user changes controller type
             if ctrl_key != _last_ctrl_key:
                 _retry_delay  = 0.5
                 _last_ctrl_key = ctrl_key
@@ -732,23 +880,16 @@ def mouse_control_loop():
                 hold_start = None
             toggle_was = pressed
 
-            raw_lmb = ctrl.get_button_state("LMB")
+            # ── FIX v5.5: physical LMB like RF worker (fixes cached state) ──
+            if isinstance(ctrl, SoftwareController):
+                lmb_phys = ctrl.get_physical_lmb()          # direct GetAsyncKeyState
+            else:
+                lmb_phys = _rf_lmb_held[0]                  # KMBox / MAKCU monitor thread
+
+            raw_lmb = ctrl.get_button_state("LMB")          # kept for possible future use
             rmb     = ctrl.get_button_state("RMB")
 
-            # ── Rapid Fire — main loop set/clear event ──────────────────────
-            # main loop อ่าน LMB จาก poll thread (GetAsyncKeyState) ซึ่งถูกต้อง
-            # เพราะ click_lmb() ทำงานใน RF worker thread แยก ไม่ใช่ใน main loop
-            # ดังนั้น GetAsyncKeyState ใน poll thread ไม่ถูก block โดย synthetic LEFTUP
-            # (synthetic LEFTUP และ GetAsyncKeyState อยู่คนละ thread → timing ต่างกัน)
-            rf_en, _ = app_state.get_rapid_fire()
-            trigger_mode = app_state.get_trigger_mode()
-            rf_held = (raw_lmb and rmb) if trigger_mode == "LMB+RMB" else raw_lmb
-            if rf_en and rf_held:
-                _rf_event.set()
-            else:
-                _rf_event.clear()
-
-            lmb = raw_lmb
+            lmb = lmb_phys   # use physical state for fire condition
 
             # ── Hip Fire detection ────────────────────────────────────────────
             hf_en, hf_pd, hf_hz = app_state.get_hip_fire()
@@ -761,6 +902,10 @@ def mouse_control_loop():
             else:
                 fire = (lmb and rmb) if trigger_mode == "LMB+RMB" else lmb
 
+            # ── RF + RCS together ─────────────────────────────────────────
+            # RF worker (separate thread) handles clicks
+            # RCS main loop uses same fire condition — recoil moves apply normally
+            # Both can run: RF spam-clicks, RCS pulls recoil
             if app_state.get_enabled() and fire:
                 now = time.perf_counter()
                 if hold_start is None:
@@ -780,7 +925,7 @@ def mouse_control_loop():
                     v_dur    = app_state.get_vertical_duration()
                     v_active = (hold_ms >= v_delay) and (v_dur == 0 or hold_ms <= v_delay + v_dur)
                     if v_active:
-                        # FIX: curve หมด → fall back ค่าคงที่ (เดิม min() ติดค่าสุดท้าย = ปืนดีดขึ้น)
+                        # FIX: past end of curve → fall back to constant (old min() stuck at last = wrong pull)
                         if pd_curve and curve_tick < len(pd_curve):
                             raw_y = pd_curve[curve_tick] / 5.0
                         else:
@@ -792,7 +937,7 @@ def mouse_control_loop():
                     h_dur   = app_state.get_horizontal_duration()
                     raw_x   = 0.0
                     if hold_ms >= h_delay and (h_dur == 0 or hold_ms <= h_delay + h_dur):
-                        # FIX: curve หมด → fall back ค่าคงที่
+                        # FIX: past end of curve → fall back to constant
                         if hz_curve and curve_tick < len(hz_curve):
                             raw_x = hz_curve[curve_tick] / 5.0
                         else:
@@ -847,8 +992,8 @@ async def ws_endpoint(websocket: WebSocket):
                         try: getattr(app_state, fn)(conv(msg[k]))
                         except: pass
 
-                # BUG FIX: เพิ่ม horizontal_curve handler ใน WebSocket
-                # v5.0 ขาด handler นี้ทำให้ horizontal_curve ไม่ถูก set ผ่าน WS
+                # BUG FIX: horizontal_curve handler in WebSocket
+                # v5.0 lacked this so horizontal_curve was not set via WS
                 pd_curve, hz_curve = app_state.get_curves()
 
                 if "pull_down_curve" in msg:
@@ -859,7 +1004,7 @@ async def ws_endpoint(websocket: WebSocket):
                     v = msg["horizontal_curve"]
                     hz_curve = v if isinstance(v, list) and len(v) > 0 else None
 
-                # อัพเดททั้งคู่พร้อมกันถ้ามีการเปลี่ยนแปลง
+                # update both curves together when either changes
                 if "pull_down_curve" in msg or "horizontal_curve" in msg:
                     app_state.set_curves(pd_curve, hz_curve)
 
@@ -913,11 +1058,11 @@ async def kmbox_connect():
     cfg = app_state.get_kmbox_config()
     uuid = cfg["uuid"].replace("-","").replace(" ","")
     if len(uuid) < 8:
-        return {"connected": False, "message": "UUID ไม่ได้กรอก — ต้องการ 8 hex chars เช่น 4BD95C53"}
+        return {"connected": False, "message": "UUID missing — need 8 hex chars e.g. 4BD95C53"}
     ok = kmbox_controller.connect()
     if ok:
-        return {"connected": True, "message": f"เชื่อมต่อสำเร็จ {cfg['ip']}:{cfg['port']}"}
-    return {"connected": False, "message": "เชื่อมต่อไม่ได้ — ตรวจสอบ IP/Port/UUID"}
+        return {"connected": True, "message": f"Connected {cfg['ip']}:{cfg['port']}"}
+    return {"connected": False, "message": "Could not connect — check IP/Port/UUID"}
 
 @app.get("/config-files")
 async def get_config_files():
@@ -1005,22 +1150,22 @@ async def set_beep(cfg: BeepConfig):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  UI  v5.2
+#  UI  v5.5
 # ══════════════════════════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
-<html lang="th">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>RVN v5.2</title>
+<title>RVN v5.5</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+Thai:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
 <style>
 :root{
   --bg:#09090c;--sf:#111116;--bd:#1c1c24;--bd2:#252530;
   --tx:#c0c0d0;--mu:#3a3a4c;
   --ac:#5bf0a0;--ac2:#3cd880;--bl:#4ea8ff;--rd:#ff4d6a;--yl:#ffc84a;--vi:#c084fc;--or:#ff9944;
-  --mo:'JetBrains Mono',monospace;--sa:'Noto Sans Thai',sans-serif;
+  --mo:'JetBrains Mono',monospace;--sa:'Inter',system-ui,sans-serif;
   --r:10px;
 }
 *{margin:0;padding:0;box-sizing:border-box;}
@@ -1127,7 +1272,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .sw-notice .w-line{color:#5a3a10;display:block;margin-top:4px;}
 .hf-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px;}
 .hf-lbl{font-size:.6rem;color:var(--mu);margin-bottom:3px;font-family:var(--mo);text-transform:uppercase;letter-spacing:.5px;}
-/* v5.2 fix indicator */
+/* v5.5 fix indicator */
 .num-row{display:flex;align-items:baseline;gap:4px;margin-bottom:6px;}
 .unit{font-family:var(--mo);font-size:.62rem;color:var(--mu);}
 </style>
@@ -1136,7 +1281,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 <div class="w">
   <div class="hdr">
     <div class="logo">R<em>V</em>N</div>
-    <span class="vtag">v5.2 — RCS</span>
+    <span class="vtag">v5.5 — RCS</span>
     <span id="conn-dot" class="conn-dot" title="Controller connection"></span>
   </div>
 
@@ -1150,7 +1295,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
         <option value="M4">M4 (Side Back)</option>
         <option value="M5" selected>M5 (Side Forward)</option>
       </select>
-      <button id="beep-btn" title="เสียง Beep on/off" style="margin-left:auto;padding:3px 10px;border-radius:12px;font-size:.7rem;font-family:var(--mo);cursor:pointer;border:1px solid var(--bd2);background:var(--bg);color:var(--mu);transition:all .2s;">🔔</button>
+      <button id="beep-btn" title="Beep on/off" style="margin-left:auto;padding:3px 10px;border-radius:12px;font-size:.7rem;font-family:var(--mo);cursor:pointer;border:1px solid var(--bd2);background:var(--bg);color:var(--mu);transition:all .2s;">🔔</button>
     </div>
   </div>
 
@@ -1166,7 +1311,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
       <div class="hf-lbl">Interval</div>
       <div style="display:flex;align-items:baseline;gap:4px;">
-        <!-- BUG FIX: เพิ่ม oninput ผ่าน JS แทน hardcode -->
+        <!-- BUG FIX: oninput wired in JS instead of hardcoded -->
         <input type="number" class="num num-sm" id="rf-ms" value="100" min="30" max="2000" style="width:80px;">
         <span class="unit">ms</span>
       </div>
@@ -1192,7 +1337,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
           <input type="number" class="num num-sm" id="hf-hz" value="0" min="-300" max="300" step="0.5">
         </div>
       </div>
-      <div class="hint" style="margin-top:5px;">ใช้เมื่อไม่กด RMB (no ADS)</div>
+      <div class="hint" style="margin-top:5px;">When RMB is not held (no ADS)</div>
     </div>
   </div>
 
@@ -1221,14 +1366,14 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
           <input type="range" min="0" max="10000" step="1" value="0" id="vdus">
         </div>
       </div>
-      <div class="hint">Delay = หน่วงก่อนเริ่ม · Duration = นานแค่ไหน · 0 Duration = ตลอด</div>
+      <div class="hint">Delay = wait before start · Duration = how long · 0 = unlimited</div>
     </div>
 
     <div class="card">
       <div class="clabel">Horizontal <span id="cph" class="cpill" style="display:none">CURVE</span></div>
       <input type="number" class="num" id="hv" value="0" min="-300" max="300" step="0.001">
       <input type="range" min="-300" max="300" value="0" id="hs">
-      <div class="hint" style="margin-bottom:10px">Negative = ซ้าย · Positive = ขวา · 0 = ปิด</div>
+      <div class="hint" style="margin-bottom:10px">Negative = left · Positive = right · 0 = off</div>
       <div class="sdiv">Horizontal Timing</div>
       <div class="tgrid">
         <div>
@@ -1242,13 +1387,13 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
           <input type="range" min="0" max="10000" step="1" value="2000" id="us">
         </div>
       </div>
-      <div class="hint">0 Duration = ตลอดเวลา</div>
+      <div class="hint">0 Duration = entire hold</div>
     </div>
 
     <div class="card">
-      <div class="clabel">Recoil Curve <span style="font-size:.85em;color:var(--mu);letter-spacing:0;font-family:var(--sa);">— override ค่าคงที่</span></div>
-      <div class="hint" style="margin-bottom:9px">ลากเพื่อวาด · แกน X = เวลา · แกน Y = แรงดีด<br>
-        <span style="color:#223a28;">— — —</span> เส้นประ = ค่าคงที่ &nbsp;<span style="color:#3ab070;">——</span> เส้น = curve</div>
+      <div class="clabel">Recoil Curve <span style="font-size:.85em;color:var(--mu);letter-spacing:0;font-family:var(--sa);">— overrides constant value</span></div>
+      <div class="hint" style="margin-bottom:9px">Drag to draw · X = time · Y = pull strength<br>
+        <span style="color:#223a28;">— — —</span> dashed = constant &nbsp;<span style="color:#3ab070;">——</span> solid = curve</div>
       <div class="ceditor">
         <canvas id="curve-canvas" height="120"></canvas>
         <div class="cacts">
@@ -1271,13 +1416,13 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
         <input type="range" id="js" min="0" max="1" step="0.01" value="0.15" style="flex:1">
         <span class="hval" id="jv">0.15</span>
       </div>
-      <div class="hint" style="margin-bottom:13px">Gaussian noise ต่อ tick · 0 = ปิด · 1 = สูงสุด</div>
+      <div class="hint" style="margin-bottom:13px">Gaussian noise per tick · 0 = off · 1 = max</div>
       <div class="hrow">
         <span class="hlbl">Smooth</span>
         <input type="range" id="ss" min="0" max="0.94" step="0.01" value="0.60" style="flex:1">
         <span class="hval" id="sv2">0.60</span>
       </div>
-      <div class="hint">Exponential smoothing · 0 = ดิบ · 0.94 = นุ่มมาก</div>
+      <div class="hint">Exponential smoothing · 0 = raw · 0.94 = very smooth</div>
     </div>
   </div>
 
@@ -1287,8 +1432,8 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
     <div class="card">
       <div class="clabel">Trigger Mode</div>
       <select id="trig">
-        <option value="LMB">LMB เท่านั้น</option>
-        <option value="LMB+RMB">LMB + RMB พร้อมกัน (ADS + ยิง)</option>
+        <option value="LMB">LMB only</option>
+        <option value="LMB+RMB">LMB + RMB together (ADS + fire)</option>
       </select>
     </div>
 
@@ -1312,27 +1457,27 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
           <input type="text" id="km-port" placeholder="57856">
         </div>
         <div>
-          <label style="font-size:.64rem;color:var(--rd);display:block;margin-bottom:4px;text-transform:uppercase;">UUID ★ จำเป็น</label>
+          <label style="font-size:.64rem;color:var(--rd);display:block;margin-bottom:4px;text-transform:uppercase;">UUID ★ required</label>
           <input type="text" id="km-uuid" placeholder="3AC07019" style="border-color:#3a1820;">
         </div>
       </div>
       <div class="row">
-        <button class="btn btn-s" id="km-save" style="flex:1">บันทึก</button>
-        <button class="btn btn-g" id="km-conn" style="flex:1">เชื่อมต่อ</button>
+        <button class="btn btn-s" id="km-save" style="flex:1">Save</button>
+        <button class="btn btn-g" id="km-conn" style="flex:1">Connect</button>
       </div>
       <div id="km-msg" style="margin-top:7px;font-size:.7rem;color:var(--mu);min-height:1.2em;font-family:var(--mo)"></div>
       <div class="hint" style="margin-top:8px;line-height:1.9">
-        UUID หาได้จาก <strong>KMBox Client → Device Info</strong><br>
-        Port: ดูจากหน้าจอ KMBox device โดยตรง<br>
-        ไม่ต้องติดตั้ง library ใด — ใช้ UDP ตรง
+        Find UUID in <strong>KMBox Client → Device Info</strong><br>
+        Port: check the KMBox device screen<br>
+        No extra libraries — raw UDP only
       </div>
     </div>
 
     <div class="card" id="sw-card" style="display:none">
       <div class="clabel">Software Direct Mode</div>
       <div class="sw-notice">
-        SendInput Windows API<br>ทำงานบน <strong>1-PC</strong> โดยไม่ต้องมีฮาร์ดแวร์ภายนอก
-        <span class="w-line">⚠ ต้องรัน Python บน Windows เท่านั้น<br>⚠ อาจตรวจจับได้โดย Anti-Cheat</span>
+        SendInput Windows API<br>Runs on a <strong>single PC</strong> with no external hardware
+        <span class="w-line">⚠ Python must run on Windows only<br>⚠ May be detected by anti-cheat</span>
       </div>
       <div id="sw-status" style="margin-top:8px;font-size:.68rem;font-family:var(--mo);color:var(--mu);">—</div>
     </div>
@@ -1418,7 +1563,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
         <button class="btn" id="add-tag-btn" style="flex:0 0 auto;padding:7px 10px;font-size:.67rem;">+ Tag</button>
       </div>
 
-      <div class="sp-preview" id="sp-preview">กรอกชื่อก่อน…</div>
+      <div class="sp-preview" id="sp-preview">Enter a name first…</div>
       <div class="sp-actions">
         <button class="btn btn-s" id="save-btn">Save</button>
         <button class="btn" id="overwrite-btn" style="background:#050c14;border-color:#10283a;color:#5599cc;">Overwrite</button>
@@ -1477,18 +1622,18 @@ sync($('vds'),$('vdv')); sync($('vdus'),$('vduv'));
 $('js').oninput=()=>{ $('jv').textContent=parseFloat($('js').value).toFixed(2); sendAll(); };
 $('ss').oninput=()=>{ $('sv2').textContent=parseFloat($('ss').value).toFixed(2); sendAll(); };
 
-// ── BUG FIX: Rapid fire slider/input sync — ส่ง interval ทันทีเมื่อเปลี่ยนค่า ──────
+// ── BUG FIX: rapid fire slider/input sync — send interval as soon as value changes ──
 const rfMs=$('rf-ms'), rfSl=$('rf-sl');
 
 function sendRFInterval() {
-  // ส่งค่า interval ไปยัง server เสมอ (ไม่ว่า rfEnabled จะเป็น true/false)
-  // เพื่อให้ server มีค่าล่าสุดพร้อมเสมอเมื่อ enable
+  // Always send interval to server (whether rfEnabled is true or false)
+  // so the server has the latest value when RF is enabled
   fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled:rfEnabled, interval_ms:safeNum(rfMs.value,100)})
   }).catch(()=>{});
 }
 
-// BUG FIX: ใช้ 'input' แทน 'change' — 'change' ต้อง blur ก่อนถึงจะ fire
+// BUG FIX: use 'input' not 'change' — 'change' fires only after blur
 rfSl.oninput = ()=>{
   rfMs.value = rfSl.value;
   sendRFInterval();
@@ -1547,13 +1692,13 @@ $('beep-btn').onclick = ()=>{
     body:JSON.stringify({enabled:beepEnabled})});
 };
 
-// ── BUG FIX: Rapid Fire pill — ส่ง interval_ms ทุกครั้งที่กด pill ──────────────
+// ── BUG FIX: Rapid Fire pill — send interval_ms on every pill click ───────────────
 let rfEnabled = false;
 function syncRF() {
   rfEnabled = !rfEnabled;
   $('rf-pill').classList.toggle('on', rfEnabled);
   $('rf-lbl').textContent = rfEnabled ? 'ON' : 'OFF';
-  // BUG FIX: ส่ง interval_ms จาก input ปัจจุบันทุกครั้ง (ไม่ใช่ค่า default 100)
+  // BUG FIX: send interval_ms from current input every time (not default 100)
   fetch('/rapid-fire',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled:rfEnabled, interval_ms:safeNum(rfMs.value,100)})
   }).then(r=>r.json()).then(d=>{
@@ -1563,10 +1708,10 @@ function syncRF() {
 }
 $('rf-pill').onclick = syncRF;
 
-// ── BUG FIX: Hip Fire — ส่งค่าเสมอแม้ pill ปิดอยู่ เพื่อ persist ค่า ──────────
+// ── BUG FIX: Hip Fire — always send values even when pill is off (persist) ───────
 let hfEnabled = false;
 function sendHF() {
-  // BUG FIX: ส่งเสมอ ไม่ check hfEnabled ก่อน
+  // BUG FIX: always send; do not gate on hfEnabled
   fetch('/hip-fire',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled:hfEnabled, pull_down:safeNum($('hf-pd').value), horizontal:safeNum($('hf-hz').value)})
   }).catch(()=>{});
@@ -1578,12 +1723,12 @@ $('hf-pill').onclick = ()=>{
   sendHF();
   toast(hfEnabled ? '🎯 Hip Fire ON' : 'Hip Fire OFF', hfEnabled ? 'var(--vi)' : 'var(--mu)');
 };
-// BUG FIX: ส่งค่าทุกครั้งที่เปลี่ยน (ไม่ว่า enabled หรือไม่)
+// BUG FIX: send on every change (enabled or not)
 $('hf-pd').oninput = sendHF;
 $('hf-hz').oninput = sendHF;
 
-// BUG FIX: ป้องกัน getStatus() overwrite ค่าที่ user กำลังแก้อยู่
-// และ sync ค่า pull_down/horizontal กลับมา UI ตอน init ครั้งแรก
+// BUG FIX: stop getStatus() overwriting fields the user is editing
+// and sync pull_down/horizontal into UI on first init only
 let _statusInitDone = false;
 let _lastFocusedInput = null;
 let _lastConfigLoad = 0;  // timestamp of last config load from browse
@@ -1606,8 +1751,8 @@ function getStatus() {
     if(d.kmbox_ip && !$('km-ip').value){ $('km-ip').value=d.kmbox_ip; $('km-port').value=d.kmbox_port; }
     setConnDot(!!d.ctrl_connected);
 
-    // BUG FIX: sync pull_down/horizontal กลับมา UI ตอน init ครั้งแรกเท่านั้น
-    // ไม่ overwrite ทุก poll เพราะจะทำให้ config ที่โหลดถูก reset
+    // BUG FIX: sync pull_down/horizontal on first init only
+    // do not overwrite every poll or loaded configs get reset
     if(!_statusInitDone) {
       if(d.pull_down  !==undefined){ $('sv').value=d.pull_down;   $('sl').value=Math.round(d.pull_down); }
       if(d.horizontal !==undefined){ $('hv').value=d.horizontal;  $('hs').value=Math.round(d.horizontal); }
@@ -1618,12 +1763,12 @@ function getStatus() {
       _statusInitDone = true;
     }
 
-    // Rapid fire sync — เฉพาะถ้า state ต่างกัน (ไม่ใช่ user กำลังแก้)
+    // Rapid fire sync — only when state differs (not while user is editing)
     if(d.rapid_fire_enabled!==undefined && d.rapid_fire_enabled!==rfEnabled){
       rfEnabled=d.rapid_fire_enabled;
       $('rf-pill').classList.toggle('on',rfEnabled); $('rf-lbl').textContent=rfEnabled?'ON':'OFF';
     }
-    // BUG FIX: sync interval เฉพาะตอน init หรือถ้า user ไม่ได้ focus อยู่
+    // BUG FIX: sync interval on init or when rf-ms is not focused
     if(d.rapid_fire_interval_ms && _lastFocusedInput!=='rf-ms') {
       rfMs.value=d.rapid_fire_interval_ms;
       rfSl.value=Math.min(d.rapid_fire_interval_ms,500);
@@ -1634,8 +1779,8 @@ function getStatus() {
       hfEnabled=d.hip_fire_enabled;
       $('hf-pill').classList.toggle('on',hfEnabled); $('hf-lbl').textContent=hfEnabled?'ON':'OFF';
     }
-    // FIX BUG 2: ไม่ overwrite hf-pd/hf-hz ถ้าเพิ่ง load config ภายใน 3 วินาที
-    // เพราะ getStatus อาจดึงค่าเก่าจาก server ก่อน WS/REST ส่งค่าใหม่ไปถึง
+    // FIX BUG 2: do not overwrite hf-pd/hf-hz within 3s after loading a config
+    // getStatus may return stale server state before WS/REST updates land
     const now2 = Date.now();
     if(now2 - _lastConfigLoad > 3000) {
       if(d.hip_pull_down  !==undefined && _lastFocusedInput!=='hf-pd') $('hf-pd').value=d.hip_pull_down;
@@ -1673,16 +1818,16 @@ $('trig').onchange=()=>
 const kmsg=(t,c)=>{$('km-msg').textContent=t;$('km-msg').style.color=c||'var(--mu)';};
 $('km-save').onclick=()=>{
   const ip=$('km-ip').value.trim(),port=+$('km-port').value||57856,uuid=$('km-uuid').value.trim().replace(/-/g,'').replace(/ /g,'');
-  if(!ip){kmsg('กรุณากรอก IP','var(--rd)');return;}
-  if(uuid.length<8){kmsg('กรุณากรอก UUID (เช่น 4BD95C53)','var(--rd)');return;}
+  if(!ip){kmsg('Enter IP','var(--rd)');return;}
+  if(uuid.length<8){kmsg('Enter UUID (e.g. 4BD95C53)','var(--rd)');return;}
   fetch('/kmbox-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ip,port,uuid})})
-    .then(()=>kmsg('✓ บันทึกแล้ว','var(--ac)')).catch(()=>kmsg('ไม่สำเร็จ','var(--rd)'));
+    .then(()=>kmsg('✓ Saved','var(--ac)')).catch(()=>kmsg('Failed','var(--rd)'));
 };
 $('km-conn').onclick=()=>{
-  kmsg('กำลังเชื่อมต่อ...');
+  kmsg('Connecting...');
   fetch('/kmbox-connect',{method:'POST'}).then(r=>r.json())
-    .then(d=>kmsg(d.connected?'✓ เชื่อมต่อสำเร็จ':'✗ '+d.message,d.connected?'var(--ac)':'var(--rd)'))
-    .catch(()=>kmsg('เชื่อมต่อไม่ได้','var(--rd)'));
+    .then(d=>kmsg(d.connected?'✓ Connected':'✗ '+d.message,d.connected?'var(--ac)':'var(--rd)'))
+    .catch(()=>kmsg('Connection failed','var(--rd)'));
 };
 
 // ── Curve editor ──────────────────────────────────────────────────────────────
@@ -1736,7 +1881,7 @@ $('curve-load-btn').onclick=()=>{
   pts=Array.from({length:N},(_,i)=>{const t=i/(N-1);const decay=Math.exp(-t*1.6)*0.45+0.55;return{x:t,y:1-Math.min(v*decay/300,1)};});
   drawCurve();
 };
-// Flat — curve ตรง ระดับเดียวกับค่าคงที่ (เส้นประ) แล้ว apply ทันที
+// Flat — horizontal curve at same level as constant (dashed ref), apply immediately
 $('curve-flat-btn').onclick=()=>{
   const v=Math.max(0,Math.min(300,safeNum($('sv').value)));
   const flatY=1-Math.min(v/300,1);
@@ -1748,7 +1893,7 @@ $('curve-flat-btn').onclick=()=>{
   toast('✓ Flat curve applied');
 };
 $('curve-apply-btn').onclick=()=>{
-  const c=getCurve();if(!c){showWarn('วาด curve ก่อน');return;}
+  const c=getCurve();if(!c){showWarn('Draw a curve first');return;}
   if(ws&&ws.readyState===1)ws.send(JSON.stringify({pull_down_curve:c}));
   $('cpv').style.display='inline-flex';toast('✓ Curve applied');
   const b=$('curve-apply-btn');b.textContent='Applied ✓';setTimeout(()=>{b.textContent='Apply';},1600);
@@ -1799,7 +1944,7 @@ function renderTagChips(){
 
 $('add-tag-btn').onclick=()=>{
   const k=$('tag-key').value.trim(),v=$('tag-val').value.trim();
-  if(!k||!v){showWarn('กรอกทั้ง key และ value');return;}
+  if(!k||!v){showWarn('Enter both key and value');return;}
   currentTags[k]=v;renderTagChips();updSavePreview();
   $('tag-key').value='';$('tag-val').value='';
 };
@@ -1808,7 +1953,7 @@ $('tag-val').addEventListener('keydown',e=>{if(e.key==='Enter')$('add-tag-btn').
 
 function updSavePreview(){
   const name=$('cfg-name').value.trim(),pre=$('sp-preview');
-  if(!name){pre.textContent='กรอกชื่อก่อน…';pre.className='sp-preview';return;}
+  if(!name){pre.textContent='Enter a name first…';pre.className='sp-preview';return;}
   let txt='"'+name+'"';
   if(Object.keys(currentTags).length>0)txt+='  '+Object.entries(currentTags).map(([k,v])=>`[${k}:${v}]`).join(' ');
   const vv=safeNum($('sv').value),hh=safeNum($('hv').value);
@@ -1840,12 +1985,12 @@ function buildTagFilters(){
     el.onclick=()=>{ activeTagFilters.has(tag)?activeTagFilters.delete(tag):activeTagFilters.add(tag); el.classList.toggle('active',activeTagFilters.has(tag)); filterBrowse(); };
     c.appendChild(el);
   });
-  if(tagSet.size===0)c.innerHTML='<span style="font-size:.65rem;color:var(--mu);">ยังไม่มี tags</span>';
+  if(tagSet.size===0)c.innerHTML='<span style="font-size:.65rem;color:var(--mu);">No tags yet</span>';
 }
 
 function filterBrowse(){
   const q=$('search').value.toLowerCase(),prev=$('cfgdd').value;
-  $('cfgdd').innerHTML='<option value="">-- เลือก Config --</option>';
+  $('cfgdd').innerHTML='<option value="">-- Select config --</option>';
   for(const key of allKeys){
     const cfg=cache[key];
     const name=typeof cfg==='object'?(cfg.name||key):key;
@@ -1943,14 +2088,14 @@ function buildPayload(name){
 }
 
 $('save-btn').onclick=()=>{
-  const name=$('cfg-name').value.trim();if(!name){showWarn('กรอกชื่อก่อน');return;}
+  const name=$('cfg-name').value.trim();if(!name){showWarn('Enter a name');return;}
   fetch('/configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload(name))})
-    .then(r=>r.json()).then(d=>{ if(d.detail)showWarn(d.detail); else{fetchConfigs();toast('✓ Saved: '+name);} }).catch(()=>showWarn('บันทึกไม่สำเร็จ'));
+    .then(r=>r.json()).then(d=>{ if(d.detail)showWarn(d.detail); else{fetchConfigs();toast('✓ Saved: '+name);} }).catch(()=>showWarn('Save failed'));
 };
 $('overwrite-btn').onclick=()=>{
   const key=$('cfgdd').value,name=$('cfg-name').value.trim()||key;
-  if(!key){showWarn('เลือก config ที่ต้องการ overwrite ก่อน');return;}
-  if(!confirm('Overwrite "'+name+'" ด้วยค่าปัจจุบัน?'))return;
+  if(!key){showWarn('Select a config to overwrite');return;}
+  if(!confirm('Overwrite "'+name+'" with current values?'))return;
   fetch('/configs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload(name))})
     .then(r=>r.json()).then(d=>{
       if(d.detail)showWarn(d.detail);
@@ -1959,11 +2104,11 @@ $('overwrite-btn').onclick=()=>{
         else fetchConfigs();
         toast('✓ Overwritten: '+name);
       }
-    }).catch(()=>showWarn('Overwrite ไม่สำเร็จ'));
+    }).catch(()=>showWarn('Overwrite failed'));
 };
 $('delete-btn').onclick=()=>{
-  const key=$('cfgdd').value;if(!key){showWarn('เลือก config ที่ต้องการลบก่อน');return;}
-  if(!confirm('ลบ "'+key+'"?'))return;
+  const key=$('cfgdd').value;if(!key){showWarn('Select a config to delete');return;}
+  if(!confirm('Delete "'+key+'"?'))return;
   fetch('/configs/'+encodeURIComponent(key),{method:'DELETE'})
     .then(()=>{fetchConfigs();toast('Deleted: '+key,'var(--rd)');}).catch(()=>{});
 };
@@ -1993,7 +2138,7 @@ $('create-cfg').onclick=()=>{
 };
 $('delete-cfg').onclick=()=>{
   const f=$('cfgfd').value;if(!f||f==='default.json')return;
-  if(confirm('ลบ profile "'+f+'"?'))
+  if(confirm('Delete profile "'+f+'"?'))
     fetch('/config-files/'+encodeURIComponent(f),{method:'DELETE'})
       .then(()=>{fetchCfgFiles();toast('Profile deleted','var(--rd)');}).catch(()=>{});
 };
@@ -2024,7 +2169,7 @@ def get_local_ip():
 
 if __name__ == "__main__":
     ip = get_local_ip()
-    print(f"\n  ┌─ RVN v5.2 ─────────────────────────────────────────┐")
+    print(f"\n  ┌─ RVN v5.5 ─────────────────────────────────────────┐")
     print(f"  │  Local  : http://localhost:8000                    │")
     print(f"  │  Network: http://{ip}:8000        │")
     print(f"  └────────────────────────────────────────────────────┘\n")
