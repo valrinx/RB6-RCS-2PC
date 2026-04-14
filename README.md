@@ -10,8 +10,7 @@
 > **RVN — Recoil Control System  v7.0**
 >
 > **Changes from v6.0:**
-> - **FIX:**
-  • FIX: Weapon Slot dropdowns now correctly show saved gun configs
+> - **FIX:** Weapon Slot dropdowns now correctly show saved gun configs
     (buildWsGrid was called before fetchConfigs finished loading)
   • NEW: Per-slot Rapid Fire — each weapon slot can have its own RF setting
     Slot 1: RF OFF, Slot 2: RF ON 80ms, etc.
