@@ -7,11 +7,10 @@
 > The MAKXD (new makcu) will have built-in advanced RCS, which may eventually make this tool obsolete for makcu users. Software Direct mode (1-PC, no hardware) is still fully supported.
 
 > [!NOTE]
-> **RVN — Recoil Control System v5.5**
+> **RVN — Recoil Control System  v7.0**
 >
-> **Changes from v5.4:**
-> - **FIX:** # RVN — Recoil Control System  v7.0
-Changes from v6.0:
+> **Changes from v6.0:**
+> - **FIX:**
   • FIX: Weapon Slot dropdowns now correctly show saved gun configs
     (buildWsGrid was called before fetchConfigs finished loading)
   • NEW: Per-slot Rapid Fire — each weapon slot can have its own RF setting
