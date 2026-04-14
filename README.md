@@ -10,9 +10,13 @@
 > **RVN — Recoil Control System v5.5**
 >
 > **Changes from v5.4:**
-> - **FIX:** Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
->    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
-> -  The main loop now reads physical LMB the same way as the RF worker.
+> - **FIX:** # RVN — Recoil Control System  v7.0
+Changes from v6.0:
+  • FIX: Weapon Slot dropdowns now correctly show saved gun configs
+    (buildWsGrid was called before fetchConfigs finished loading)
+  • NEW: Per-slot Rapid Fire — each weapon slot can have its own RF setting
+    Slot 1: RF OFF, Slot 2: RF ON 80ms, etc.
+    "inherit" = use global RF setting (same as before)
     
 A game-agnostic recoil control script with a web UI. Supports MAKCU, KMBox, and Software Direct (no hardware, 1-PC).
 
