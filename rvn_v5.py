@@ -1,9 +1,11 @@
 """
-# RVN — Recoil Control System  v5.5
-Changes from v5.4:
-  • FIX: Trigger mode "LMB Only" now behaves correctly in hold-to-fire mode
-    (Previously cached button state was polluted by RF synthetic clicks → stuck state.)
-    The main loop now reads physical LMB the same way as the RF worker.
+# RVN — Recoil Control System  v7.0
+Changes from v6.0:
+  • FIX: Weapon Slot dropdowns now correctly show saved gun configs
+    (buildWsGrid was called before fetchConfigs finished loading)
+  • NEW: Per-slot Rapid Fire — each weapon slot can have its own RF setting
+    Slot 1: RF OFF, Slot 2: RF ON 80ms, etc.
+    "inherit" = use global RF setting (same as before)
 """
 
 import threading
@@ -12,7 +14,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
-import json, os, socket, time, random
+import sys, json, os, socket, time, random
 from contextlib import asynccontextmanager
 
 # ── Optional platform libs ────────────────────────────────────────────────────
@@ -347,7 +349,12 @@ def get_active_controller():
 # ══════════════════════════════════════════════════════════════════════════════
 #  Config helpers
 # ══════════════════════════════════════════════════════════════════════════════
-CONFIG_DIR = os.path.join(os.path.dirname(__file__), 'configs')
+def _base_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_DIR = os.path.join(_base_dir(), 'configs')
 os.makedirs(CONFIG_DIR, exist_ok=True)
 DEFAULT_CONFIG_FILE = "default.json"
 
@@ -447,21 +454,32 @@ class HipFireConfig(BaseModel):
 # ══════════════════════════════════════════════════════════════════════════════
 # ── Beep helper ──────────────────────────────────────────────────────────────
 def _play_beep(enabled: bool):
-    """Short beep on toggle — winsound on Windows, otherwise silent."""
+    """Toggle ON/OFF beep — winsound on Windows, otherwise silent."""
     try:
         import winsound
         if enabled:
-            # ON: two rising notes
-            winsound.Beep(880, 60)
-            time.sleep(0.04)
-            winsound.Beep(1320, 80)
+            # ON: low → high (power-up feel)
+            winsound.Beep(600, 50)
+            time.sleep(0.03)
+            winsound.Beep(1000, 70)
         else:
-            # OFF: two falling notes
-            winsound.Beep(880, 60)
-            time.sleep(0.04)
-            winsound.Beep(587, 80)
+            # OFF: high → low (power-down feel)
+            winsound.Beep(1000, 50)
+            time.sleep(0.03)
+            winsound.Beep(400, 80)
     except Exception:
         pass   # non-Windows or no audio — silent
+
+def _play_slot_beep(slot: int):
+    """Slot switch beep — short single tone per slot number, clearly different from toggle."""
+    try:
+        import winsound
+        # Each slot has a distinct pitch: slot 1=low, slot 5=high
+        freqs = {1: 700, 2: 850, 3: 1000, 4: 1200, 5: 1500}
+        freq = freqs.get(slot, 900)
+        winsound.Beep(freq, 55)
+    except Exception:
+        pass
 
 
 class AppState:
@@ -620,10 +638,187 @@ class AppState:
                 "hip_pull_down":          hf_pd,
                 "hip_horizontal":         hf_hz,
                 "beep_enabled":           self.beep_enabled,
+                # weapon slot — populated after weapon_slot_mgr exists
+                "weapon_slot_enabled":    False,
+                "active_slot":            0,
             }
 
 
 app_state = AppState()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  WeaponSlotManager  — per-slot RCS config + keyboard hotkey switching
+#
+#  Usage:
+#    • Assign a saved gun config name to each slot key (1–5) via the UI or API
+#    • Enable weapon slot mode
+#    • Press 1 in-game → slot 1 config loads automatically into RCS
+#    • Press 2 in-game → slot 2 config loads (e.g. pistol with lower pull_down)
+#    • Slots without an assigned config are silently skipped
+#
+#  Detection method: GetAsyncKeyState on VK codes 0x31–0x35 (keys '1'–'5')
+#  Edge-detect (rising edge only) so holding the key does not spam-switch.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Virtual-key codes for keyboard keys '1'–'5'
+_VK_SLOT = {
+    1: 0x31,  # '1'
+    2: 0x32,  # '2'
+    3: 0x33,  # '3'
+    4: 0x34,  # '4'
+    5: 0x35,  # '5'
+}
+
+
+class WeaponSlotManager:
+    """Stores per-slot config assignments and loads them into app_state on slot switch."""
+
+    def __init__(self):
+        self._lock    = threading.Lock()
+        self._enabled = False
+        self._active_slot = 0        # 0 = none selected yet
+        # slot_num → config name (str) or None
+        self._slots: Dict[int, Optional[str]] = {i: None for i in range(1, 6)}
+        # slot_num → rapid fire settings: {"enabled": bool, "interval_ms": int} or None (= inherit global)
+        self._slot_rf: Dict[int, Optional[dict]] = {i: None for i in range(1, 6)}
+
+    # ── Public API ────────────────────────────────────────────────────────────
+    def set_enabled(self, v: bool):
+        with self._lock:
+            self._enabled = bool(v)
+
+    def get_enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    def set_slot(self, slot: int, config_name: Optional[str]):
+        """Assign a gun config name to a slot (1–5). Pass None to clear."""
+        if slot not in range(1, 6):
+            return False
+        with self._lock:
+            self._slots[slot] = config_name or None
+        return True
+
+    def get_slots(self) -> Dict[int, Optional[str]]:
+        with self._lock:
+            return dict(self._slots)
+
+    def set_slot_rf(self, slot: int, enabled: Optional[bool], interval_ms: Optional[int]):
+        """Set per-slot rapid fire override. Pass enabled=None to clear (inherit global)."""
+        if slot not in range(1, 6):
+            return False
+        with self._lock:
+            if enabled is None:
+                self._slot_rf[slot] = None
+            else:
+                self._slot_rf[slot] = {
+                    "enabled": bool(enabled),
+                    "interval_ms": max(30, min(2000, int(interval_ms or 100)))
+                }
+        return True
+
+    def get_slot_rf(self) -> Dict[int, Optional[dict]]:
+        with self._lock:
+            return dict(self._slot_rf)
+
+    def get_active_slot(self) -> int:
+        with self._lock:
+            return self._active_slot
+
+    def activate_slot(self, slot: int) -> bool:
+        """Load the config assigned to *slot* into app_state. Returns True on success."""
+        with self._lock:
+            if not self._enabled:
+                return False
+            name = self._slots.get(slot)
+            if not name:
+                return False
+            self._active_slot = slot
+
+        # Read config outside lock — I/O can be slow
+        cf   = app_state.get_current_config_file()
+        cfgs = read_configs(cf)
+        cfg  = cfgs.get(name)
+        if cfg is None:
+            print(f"[SLOT] Config '{name}' not found in {cf}")
+            return False
+
+        # Apply all fields that exist in the saved config
+        def _f(key, default=0.0): return float(cfg.get(key, default))
+        def _i(key, default=0):   return int(cfg.get(key, default))
+
+        app_state.set_active_value(_f("pull_down", 1.0))
+        app_state.set_horizontal_value(_f("horizontal", 0.0))
+        app_state.set_horizontal_delay(_i("horizontal_delay_ms", 500))
+        app_state.set_horizontal_duration(_i("horizontal_duration_ms", 2000))
+        app_state.set_vertical_delay(_i("vertical_delay_ms", 0))
+        app_state.set_vertical_duration(_i("vertical_duration_ms", 0))
+
+        pd_curve = cfg.get("pull_down_curve")
+        hz_curve = cfg.get("horizontal_curve")
+        app_state.set_curves(
+            pd_curve if isinstance(pd_curve, list) and pd_curve else None,
+            hz_curve if isinstance(hz_curve, list) and hz_curve else None,
+        )
+
+        # Hip fire overrides (if present in config)
+        if "hip_pull_down" in cfg or "hip_horizontal" in cfg:
+            hf_en, hf_pd, hf_hz = app_state.get_hip_fire()
+            app_state.set_hip_fire(
+                hf_en,
+                float(cfg.get("hip_pull_down", hf_pd)),
+                float(cfg.get("hip_horizontal", hf_hz)),
+            )
+
+        print(f"[SLOT] Slot {slot} → '{name}' loaded")
+
+        # Apply per-slot rapid fire if configured
+        with self._lock:
+            rf_override = self._slot_rf.get(slot)
+        if rf_override is not None:
+            app_state.set_rapid_fire(rf_override["enabled"], rf_override["interval_ms"])
+            print(f"[SLOT] Slot {slot} rapid fire: enabled={rf_override['enabled']} interval={rf_override['interval_ms']}ms")
+
+        _play_slot_beep(slot)   # distinct per-slot tone
+        return True
+
+
+weapon_slot_mgr = WeaponSlotManager()
+
+
+def _weapon_slot_detector():
+    """Background thread — polls keyboard for slot keys 1–5.
+    Uses GetAsyncKeyState from ctypes (same as SoftwareController).
+    Requires Windows; silently does nothing on other platforms."""
+    if not _HAS_CTYPES:
+        return
+    try:
+        user32 = ctypes.windll.user32
+    except AttributeError:
+        return
+
+    prev = {slot: False for slot in _VK_SLOT}
+
+    while True:
+        try:
+            if weapon_slot_mgr.get_enabled():
+                for slot, vk in _VK_SLOT.items():
+                    pressed = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+                    # Rising edge only
+                    if pressed and not prev[slot]:
+                        weapon_slot_mgr.activate_slot(slot)
+                    prev[slot] = pressed
+            else:
+                # Reset edge-detect state when disabled
+                for slot in _VK_SLOT:
+                    prev[slot] = False
+        except Exception as e:
+            print(f"[SLOT_DETECT] {e}")
+        time.sleep(0.015)   # ~67 Hz poll — fast enough, won't miss a keypress
+
+
+threading.Thread(target=_weapon_slot_detector, daemon=True, name="WeaponSlotDetector").start()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -738,7 +933,20 @@ def mouse_control_loop():
 
         while True:
             try:
+                # ── Per-slot RF override ──────────────────────────────────────
+                # If weapon slots are enabled and the active slot has its own RF
+                # setting, use that instead of the global rapid-fire state.
+                # This runs every tick so toggling global RF never clobbers the
+                # slot override while a slot is active.
                 rf_en, rf_ms = app_state.get_rapid_fire()
+                if weapon_slot_mgr.get_enabled():
+                    active_slot = weapon_slot_mgr.get_active_slot()
+                    if active_slot > 0:
+                        slot_rf = weapon_slot_mgr.get_slot_rf().get(active_slot)
+                        if slot_rf is not None:
+                            rf_en = slot_rf["enabled"]
+                            rf_ms = slot_rf["interval_ms"]
+
                 if not rf_en:
                     # RF off — if SW controller left LMB down, send UP first
                     if _sw_lmb_down:
@@ -1016,7 +1224,15 @@ async def ws_endpoint(websocket: WebSocket):
 
 @app.get("/status")
 async def status():
-    return app_state.get_status()
+    s = app_state.get_status()
+    # Inject live weapon slot data (manager created after app_state)
+    s["weapon_slot_enabled"] = weapon_slot_mgr.get_enabled()
+    s["active_slot"]         = weapon_slot_mgr.get_active_slot()
+    # Include active slot's config name so UI can highlight it
+    active = weapon_slot_mgr.get_active_slot()
+    slots  = weapon_slot_mgr.get_slots()
+    s["active_slot_config"] = slots.get(active) if active > 0 else None
+    return s
 
 @app.post("/toggle")
 async def toggle():
@@ -1143,20 +1359,71 @@ async def set_hip_fire(cfg: HipFireConfig):
 class BeepConfig(BaseModel):
     enabled: bool = True
 
+class WeaponSlotAssign(BaseModel):
+    slot:        int            = Field(..., ge=1, le=5)
+    config_name: Optional[str] = None   # None / "" = clear slot
+
+class WeaponSlotEnabled(BaseModel):
+    enabled: bool
+
+class WeaponSlotRF(BaseModel):
+    slot:        int            = Field(..., ge=1, le=5)
+    enabled:     Optional[bool] = None  # None = clear override (inherit global)
+    interval_ms: Optional[int]  = None
+
 @app.post("/beep")
 async def set_beep(cfg: BeepConfig):
     app_state.set_beep(cfg.enabled)
     return {"beep_enabled": app_state.get_beep()}
 
 
+# ── Weapon Slot endpoints ─────────────────────────────────────────────────────
+@app.get("/weapon-slots")
+async def get_weapon_slots():
+    return {
+        "enabled":     weapon_slot_mgr.get_enabled(),
+        "active_slot": weapon_slot_mgr.get_active_slot(),
+        "slots":       weapon_slot_mgr.get_slots(),
+        "slot_rf":     weapon_slot_mgr.get_slot_rf(),
+    }
+
+@app.post("/weapon-slots/enabled")
+async def set_weapon_slots_enabled(cfg: WeaponSlotEnabled):
+    weapon_slot_mgr.set_enabled(cfg.enabled)
+    return {"enabled": weapon_slot_mgr.get_enabled()}
+
+@app.post("/weapon-slots/assign")
+async def assign_weapon_slot(req: WeaponSlotAssign):
+    ok = weapon_slot_mgr.set_slot(req.slot, req.config_name)
+    if not ok:
+        raise HTTPException(400, "Slot must be 1–5")
+    return {"slot": req.slot, "config_name": req.config_name, "slots": weapon_slot_mgr.get_slots()}
+
+@app.post("/weapon-slots/assign-rf")
+async def assign_weapon_slot_rf(req: WeaponSlotRF):
+    ok = weapon_slot_mgr.set_slot_rf(req.slot, req.enabled, req.interval_ms)
+    if not ok:
+        raise HTTPException(400, "Slot must be 1–5")
+    return {"slot": req.slot, "slot_rf": weapon_slot_mgr.get_slot_rf()}
+
+@app.post("/weapon-slots/activate/{slot}")
+async def activate_weapon_slot(slot: int):
+    if slot not in range(1, 6):
+        raise HTTPException(400, "Slot must be 1–5")
+    ok = weapon_slot_mgr.activate_slot(slot)
+    if not ok:
+        raise HTTPException(404, f"Slot {slot} has no config assigned or weapon slots disabled")
+    return {"activated": slot, "active_slot": weapon_slot_mgr.get_active_slot()}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  UI  v5.5
+#  UI  v6.0
 # ══════════════════════════════════════════════════════════════════════════════
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>RVN v5.5</title>
+<title>RVN v7.0</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
@@ -1281,7 +1548,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 <div class="w">
   <div class="hdr">
     <div class="logo">R<em>V</em>N</div>
-    <span class="vtag">v5.5 — RCS</span>
+    <span class="vtag">v7.0 — RCS</span>
     <span id="conn-dot" class="conn-dot" title="Controller connection"></span>
   </div>
 
@@ -1338,6 +1605,26 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
         </div>
       </div>
       <div class="hint" style="margin-top:5px;">When RMB is not held (no ADS)</div>
+    </div>
+  </div>
+
+  <!-- ── Weapon Slots card ──────────────────────────────────────────────────── -->
+  <div class="card" id="ws-card">
+    <div class="clabel" style="justify-content:space-between;">
+      <span>Weapon Slots <span style="color:var(--ac);font-size:.85em;">KEY 1–5</span></span>
+      <button id="ws-pill" class="toggle-pill" style="margin-left:auto;">
+        <span class="dot"></span><span id="ws-lbl">OFF</span>
+      </button>
+    </div>
+    <div class="hint" style="margin-bottom:10px;">
+      พิมพ์ชื่ออาวุธในช่องค้นหาแต่ละ slot แล้วเลือกจากรายการ<br>
+      Press <b style="color:#fff;">1</b>/<b style="color:#fff;">2</b>/… in-game → RCS switches automatically.
+    </div>
+    <div id="ws-slots-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      <!-- rows injected by JS -->
+    </div>
+    <div id="ws-active-badge" style="margin-top:9px;font-family:var(--mo);font-size:.64rem;color:var(--mu);">
+      Active slot: <span id="ws-active-num" style="color:var(--ac);">—</span>
     </div>
   </div>
 
@@ -1790,10 +2077,227 @@ function getStatus() {
     if(d.beep_enabled!==undefined && d.beep_enabled!==beepEnabled){
       beepEnabled=d.beep_enabled; updateBeepBtn();
     }
+    // Weapon slot state sync
+    if(d.weapon_slot_enabled!==undefined && d.weapon_slot_enabled!==wsEnabled){
+      wsEnabled=d.weapon_slot_enabled;
+      $('ws-pill').classList.toggle('on',wsEnabled);
+      $('ws-lbl').textContent=wsEnabled?'ON':'OFF';
+    }
+    if(d.active_slot!==undefined){
+      const prev=$('ws-active-num').textContent;
+      const next=d.active_slot>0?String(d.active_slot):'—';
+      $('ws-active-num').textContent=next;
+      // If slot changed, sync recoil UI values from app_state (server already applied them)
+      if(prev!==next && d.active_slot>0){
+        if(d.pull_down  !==undefined){ $('sv').value=d.pull_down;   $('sl').value=Math.round(d.pull_down); }
+        if(d.horizontal !==undefined){ $('hv').value=d.horizontal;  $('hs').value=Math.round(d.horizontal); }
+        if(d.horizontal_delay_ms   !==undefined){ $('dv').value=d.horizontal_delay_ms;   $('ds').value=d.horizontal_delay_ms; }
+        if(d.horizontal_duration_ms!==undefined){ $('uv').value=d.horizontal_duration_ms;$('us').value=d.horizontal_duration_ms; }
+        if(d.vertical_delay_ms     !==undefined){ $('vdv').value=d.vertical_delay_ms;    $('vds').value=d.vertical_delay_ms; }
+        if(d.vertical_duration_ms  !==undefined){ $('vduv').value=d.vertical_duration_ms;$('vdus').value=d.vertical_duration_ms; }
+        $('cpv').style.display=d.has_pull_curve ?'inline-flex':'none';
+        $('cph').style.display=d.has_horiz_curve?'inline-flex':'none';
+        // Highlight active slot config in Browse list
+        if(d.active_slot_config){ $('cfgdd').value=d.active_slot_config; updBrowseLbl(); }
+        drawCurve();
+      }
+    }
   }).catch(()=>{});
 }
 getStatus();
 setInterval(getStatus, 1000);
+
+// ── Weapon Slots ──────────────────────────────────────────────────────────────
+let wsEnabled = false;
+let wsSlots   = {1:null,2:null,3:null,4:null,5:null};
+let wsSlotRf  = {1:null,2:null,3:null,4:null,5:null};
+
+function buildWsGrid() {
+  const grid = $('ws-slots-grid');
+  grid.innerHTML = '';
+
+  // Build a shared datalist for all slot search inputs
+  let dl = document.getElementById('ws-datalist');
+  if(dl) dl.remove();
+  dl = document.createElement('datalist');
+  dl.id = 'ws-datalist';
+  if(typeof allKeys !== 'undefined'){
+    for(const k of allKeys){
+      const cfg = cache[k];
+      const name = typeof cfg==='object'&&cfg.name ? cfg.name : k;
+      const opt = document.createElement('option');
+      opt.value = name;          // display name
+      opt.dataset.key = k;      // real key stored in dataset
+      dl.appendChild(opt);
+    }
+  }
+  document.body.appendChild(dl);
+
+  // Helper: resolve display name → key
+  function nameToKey(name){
+    if(!name) return null;
+    const lower = name.toLowerCase();
+    // exact match first
+    if(typeof allKeys!=='undefined'){
+      for(const k of allKeys){
+        const cfg=cache[k];
+        const n=typeof cfg==='object'&&cfg.name ? cfg.name : k;
+        if(n.toLowerCase()===lower) return k;
+      }
+      // fallback: key itself
+      if(allKeys.includes(name)) return name;
+    }
+    return null;
+  }
+
+  for(let s=1;s<=5;s++){
+    const wrap = document.createElement('div');
+    wrap.style.cssText='background:var(--bg);border:1px solid var(--bd2);border-radius:7px;padding:8px 10px;';
+
+    // Slot label
+    const lbl = document.createElement('div');
+    lbl.style.cssText='font-family:var(--mo);font-size:.58rem;color:var(--mu);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px;';
+    lbl.textContent='Slot '+s+' [key '+s+']';
+
+    // Search input wrapper
+    const inputWrap = document.createElement('div');
+    inputWrap.style.cssText='position:relative;margin-bottom:7px;';
+
+    const inp = document.createElement('input');
+    inp.type='text';
+    inp.id='ws-inp-'+s;
+    inp.setAttribute('list','ws-datalist');
+    inp.autocomplete='off';
+    inp.placeholder='Search weapon name…';
+    inp.style.cssText='width:100%;font-size:.72rem;padding:5px 7px;background:var(--bg);border:1px solid var(--bd2);border-radius:6px;color:var(--tx);font-family:var(--sa);outline:none;';
+
+    // Pre-fill with current assigned name
+    const assignedKey = wsSlots[s];
+    if(assignedKey){
+      const cfg=cache[assignedKey];
+      inp.value = typeof cfg==='object'&&cfg.name ? cfg.name : assignedKey;
+    }
+
+    // Clear button (×)
+    const clrBtn = document.createElement('button');
+    clrBtn.textContent='×';
+    clrBtn.title='Clear slot';
+    clrBtn.style.cssText='position:absolute;right:5px;top:50%;transform:translateY(-50%);background:transparent;border:none;color:var(--mu);font-size:.9rem;cursor:pointer;padding:0 3px;line-height:1;';
+    clrBtn.onclick=(e)=>{
+      e.preventDefault();
+      inp.value='';
+      assignSlot(s,null);
+    };
+
+    inputWrap.appendChild(inp);
+    inputWrap.appendChild(clrBtn);
+
+    // Commit on change/blur
+    function commitInp(inpRef, slotNum){
+      const key=nameToKey(inpRef.value.trim());
+      if(key){
+        // show canonical name
+        const cfg=cache[key];
+        inpRef.value=typeof cfg==='object'&&cfg.name ? cfg.name : key;
+        assignSlot(slotNum,key);
+      } else if(!inpRef.value.trim()){
+        assignSlot(slotNum,null);
+      }
+      // invalid text: leave as-is so user can correct
+    }
+    inp.addEventListener('change', ()=>commitInp(inp, s));
+    inp.addEventListener('blur',   ()=>commitInp(inp, s));
+
+    // Rapid Fire row
+    const rfRow = document.createElement('div');
+    rfRow.style.cssText='display:flex;align-items:center;gap:6px;margin-top:2px;';
+
+    const rfChk = document.createElement('input');
+    rfChk.type='checkbox';
+    rfChk.id='ws-rf-en-'+s;
+    const slotRf = wsSlotRf[s];
+    rfChk.checked = slotRf ? slotRf.enabled : false;
+    rfChk.title = 'Enable Rapid Fire for this slot';
+
+    const rfLbl = document.createElement('label');
+    rfLbl.htmlFor='ws-rf-en-'+s;
+    rfLbl.style.cssText='font-family:var(--mo);font-size:.6rem;color:var(--or);cursor:pointer;user-select:none;';
+    rfLbl.textContent='⚡ RF';
+
+    const rfMs = document.createElement('input');
+    rfMs.type='number';
+    rfMs.id='ws-rf-ms-'+s;
+    rfMs.min=30; rfMs.max=2000;
+    rfMs.value = slotRf ? slotRf.interval_ms : 100;
+    rfMs.style.cssText='width:58px;font-size:.68rem;padding:2px 5px;font-family:var(--mo);background:var(--sf);border:1px solid var(--bd2);border-radius:4px;color:var(--tx);';
+    rfMs.title='Rapid Fire interval (ms)';
+
+    const rfUnit = document.createElement('span');
+    rfUnit.style.cssText='font-family:var(--mo);font-size:.6rem;color:var(--mu);';
+    rfUnit.textContent='ms';
+
+    const rfClear = document.createElement('button');
+    rfClear.style.cssText='margin-left:auto;font-family:var(--mo);font-size:.58rem;color:var(--mu);background:transparent;border:1px solid var(--bd2);border-radius:4px;padding:2px 6px;cursor:pointer;';
+    rfClear.textContent='inherit';
+    rfClear.title='Inherit global Rapid Fire setting';
+    rfClear.onclick=()=>{ rfChk.checked=false; assignSlotRf(s,null,null); };
+
+    const saveRf=()=>assignSlotRf(s, rfChk.checked, parseInt(rfMs.value)||100);
+    rfChk.onchange=saveRf;
+    rfMs.onchange=saveRf;
+
+    rfRow.appendChild(rfChk);
+    rfRow.appendChild(rfLbl);
+    rfRow.appendChild(rfMs);
+    rfRow.appendChild(rfUnit);
+    rfRow.appendChild(rfClear);
+
+    wrap.appendChild(lbl);
+    wrap.appendChild(inputWrap);
+    wrap.appendChild(rfRow);
+    grid.appendChild(wrap);
+  }
+}
+
+function assignSlot(slot, configName){
+  fetch('/weapon-slots/assign',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({slot,config_name:configName||null})})
+  .then(r=>r.json()).then(d=>{
+    wsSlots=d.slots;
+    toast('Slot '+slot+': '+(configName||'cleared'),'var(--ac)');
+  }).catch(()=>{});
+}
+
+function assignSlotRf(slot, enabled, interval_ms){
+  fetch('/weapon-slots/assign-rf',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({slot, enabled, interval_ms})})
+  .then(r=>r.json()).then(d=>{
+    wsSlotRf=d.slot_rf;
+    if(enabled===null) toast('Slot '+slot+' RF: inherit global','var(--mu)');
+    else toast('Slot '+slot+' RF: '+(enabled?'ON '+interval_ms+'ms':'OFF'),'var(--or)');
+  }).catch(()=>{});
+}
+
+function fetchWsSlots(){
+  fetch('/weapon-slots').then(r=>r.json()).then(d=>{
+    wsEnabled=d.enabled;
+    wsSlots=d.slots;
+    wsSlotRf=d.slot_rf||{1:null,2:null,3:null,4:null,5:null};
+    $('ws-pill').classList.toggle('on',wsEnabled);
+    $('ws-lbl').textContent=wsEnabled?'ON':'OFF';
+    $('ws-active-num').textContent=d.active_slot>0?d.active_slot:'—';
+    buildWsGrid();
+  }).catch(()=>{});
+}
+
+$('ws-pill').onclick=()=>{
+  wsEnabled=!wsEnabled;
+  $('ws-pill').classList.toggle('on',wsEnabled);
+  $('ws-lbl').textContent=wsEnabled?'ON':'OFF';
+  fetch('/weapon-slots/enabled',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled:wsEnabled})})
+  .then(()=>toast(wsEnabled?'🔫 Weapon Slots ON':'Weapon Slots OFF',wsEnabled?'var(--ac)':'var(--mu)'));
+};
 
 // ── Controller ────────────────────────────────────────────────────────────────
 function ctrlUI(ct, connected) {
@@ -1966,8 +2470,9 @@ $('cfg-name').oninput=updSavePreview;
 let cache={},allKeys=[],activeTagFilters=new Set();
 
 function fetchConfigs(){
-  fetch('/configs').then(r=>r.json()).then(d=>{
+  return fetch('/configs').then(r=>r.json()).then(d=>{
     cache=d;allKeys=Object.keys(d);buildTagFilters();filterBrowse();
+    buildWsGrid();  // rebuild weapon slot dropdowns with fresh config list
   }).catch(()=>{});
 }
 
@@ -2128,6 +2633,7 @@ $('cfgfd').onchange=()=>{
       $('cfg-badge').textContent=d.current_config_file.replace('.json','');
       cache=d.guns;allKeys=Object.keys(d.guns);
       buildTagFilters();filterBrowse();
+      buildWsGrid();  // weapon slots follow the active profile
       toast('Profile: '+d.current_config_file.replace('.json',''));
     }).catch(()=>{});
 };
@@ -2144,7 +2650,7 @@ $('delete-cfg').onclick=()=>{
 };
 
 // Init
-fetchConfigs();fetchCfgFiles();updSavePreview();
+fetchConfigs().then(()=>fetchWsSlots());fetchCfgFiles();updSavePreview();
 });
 </script>
 </body>
@@ -2169,7 +2675,7 @@ def get_local_ip():
 
 if __name__ == "__main__":
     ip = get_local_ip()
-    print(f"\n  ┌─ RVN v5.5 ─────────────────────────────────────────┐")
+    print(f"\n  ┌─ RVN v7.0 ─────────────────────────────────────────┐")
     print(f"  │  Local  : http://localhost:8000                    │")
     print(f"  │  Network: http://{ip}:8000        │")
     print(f"  └────────────────────────────────────────────────────┘\n")
