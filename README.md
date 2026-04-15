@@ -7,14 +7,18 @@
 > The MAKXD (new makcu) will have built-in advanced RCS, which may eventually make this tool obsolete for makcu users. Software Direct mode (1-PC, no hardware) is still fully supported.
 
 > [!NOTE]
-> **RVN — Recoil Control System  v7.0**
+> **RVN — Recoil Control System v7.1**
 >
-> **Changes from v6.0:**
+> **Changes from v7.0:**
+> - **FIX:** Per-slot Rapid Fire no longer bleeds into slots that have RF off
+>   (switching to a non-RF slot now correctly restores the global RF baseline
+>   instead of carrying over the previous slot's RF state)
+>
+> **Changes from v6.0 (v7.0):**
 > - **FIX:** Weapon Slot dropdowns now correctly show saved gun configs
-    (buildWsGrid was called before fetchConfigs finished loading)
+>   (buildWsGrid was called before fetchConfigs finished loading)
 > - **NEW:** Per-slot Rapid Fire — each weapon slot can have its own RF setting
-    Slot 1: RF OFF, Slot 2: RF ON 80ms, etc.
-    "inherit" = use global RF setting (same as before)
+>   (e.g. Slot 1: RF OFF, Slot 2: RF ON 80ms); slots without an override inherit the global Rapid Fire setting
     
 A game-agnostic recoil control script with a web UI. Supports MAKCU, KMBox, and Software Direct (no hardware, 1-PC).
 
@@ -61,10 +65,10 @@ New-NetFirewallRule -DisplayName "RVN Port 8000" -Direction Inbound -Action Allo
 
 ## Usage
 
-Double-click `rvn_v5.py`, or run in terminal:
+Double-click `rvn.py`, or run in terminal:
 
 ```bash
-python rvn_v5.py
+python rvn.py
 ```
 
 The console will print the URLs to open:
