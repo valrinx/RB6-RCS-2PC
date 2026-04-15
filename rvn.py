@@ -1,11 +1,16 @@
 """
-# RVN — Recoil Control System  v7.0
-Changes from v6.0:
+# RVN — Recoil Control System  v7.1
+Changes from v7.0:
+  • FIX: Per-slot Rapid Fire no longer bleeds into slots that have RF off
+    (switching to a non-RF slot now correctly restores the global RF baseline
+    instead of carrying over the previous slot's RF state)
+
+Changes from v6.0 (v7.0):
   • FIX: Weapon Slot dropdowns now correctly show saved gun configs
     (buildWsGrid was called before fetchConfigs finished loading)
   • NEW: Per-slot Rapid Fire — each weapon slot can have its own RF setting
     Slot 1: RF OFF, Slot 2: RF ON 80ms, etc.
-    "inherit" = use global RF setting (same as before)
+    Slots without an RF override inherit the global Rapid Fire setting
 """
 
 import threading
@@ -560,6 +565,10 @@ class AppState:
         # ── Rapid Fire ───────────────────────────────────────────────────────
         self.rapid_fire_enabled      = False
         self.rapid_fire_interval_ms  = 100
+        # Global RF baseline — set only by the UI/API, never overwritten by slot activation.
+        # Per-slot RF reads this when inherit (slot_rf is None).
+        self._global_rf_enabled      = False
+        self._global_rf_interval_ms  = 100
         # ── Hip Fire ─────────────────────────────────────────────────────────
         self.hip_fire_enabled        = False
         self.hip_pull_down           = 0.0
@@ -646,12 +655,19 @@ class AppState:
         with self.lock: return {"ip": self.kmbox_ip, "port": self.kmbox_port, "uuid": self.kmbox_uuid}
 
     # ── Rapid Fire ────────────────────────────────────────────────────────────
-    def set_rapid_fire(self, enabled, interval_ms):
+    def set_rapid_fire(self, enabled, interval_ms, from_slot=False):
+        """Set rapid fire. from_slot=True preserves the global baseline (used by slot activation)."""
         with self.lock:
             self.rapid_fire_enabled     = enabled
             self.rapid_fire_interval_ms = max(30, min(2000, int(interval_ms)))
+            if not from_slot:
+                self._global_rf_enabled     = self.rapid_fire_enabled
+                self._global_rf_interval_ms = self.rapid_fire_interval_ms
     def get_rapid_fire(self):
         with self.lock: return self.rapid_fire_enabled, self.rapid_fire_interval_ms
+    def get_global_rapid_fire(self):
+        """Global RF as set by UI/API — never overwritten by per-slot activation."""
+        with self.lock: return self._global_rf_enabled, self._global_rf_interval_ms
 
     # ── Hip Fire ──────────────────────────────────────────────────────────────
     def set_hip_fire(self, enabled, pull_down, horizontal):
@@ -831,8 +847,14 @@ class WeaponSlotManager:
         with self._lock:
             rf_override = self._slot_rf.get(slot)
         if rf_override is not None:
-            app_state.set_rapid_fire(rf_override["enabled"], rf_override["interval_ms"])
+            # Slot has an explicit RF setting — apply it (marks as from_slot so global baseline is preserved)
+            app_state.set_rapid_fire(rf_override["enabled"], rf_override["interval_ms"], from_slot=True)
             print(f"[SLOT] Slot {slot} rapid fire: enabled={rf_override['enabled']} interval={rf_override['interval_ms']}ms")
+        else:
+            # No slot override → inherit: restore the global RF baseline
+            g_en, g_ms = app_state.get_global_rapid_fire()
+            app_state.set_rapid_fire(g_en, g_ms, from_slot=True)
+            print(f"[SLOT] Slot {slot} rapid fire: inherit global (enabled={g_en} interval={g_ms}ms)")
 
         _play_slot_beep(slot)   # distinct per-slot tone
         return True
@@ -988,11 +1010,12 @@ def mouse_control_loop():
         while True:
             try:
                 # ── Per-slot RF override ──────────────────────────────────────
-                # If weapon slots are enabled and the active slot has its own RF
-                # setting, use that instead of the global rapid-fire state.
-                # This runs every tick so toggling global RF never clobbers the
-                # slot override while a slot is active.
-                rf_en, rf_ms = app_state.get_rapid_fire()
+                # Read the global RF baseline (set by UI/API only).
+                # If the active slot has its own RF setting, use that instead.
+                # This keeps _rf_worker in sync with activate_slot() and avoids
+                # the previous bug where switching to a non-RF slot still fired
+                # because app_state still held the previous slot's RF values.
+                rf_en, rf_ms = app_state.get_global_rapid_fire()
                 if weapon_slot_mgr.get_enabled():
                     active_slot = weapon_slot_mgr.get_active_slot()
                     if active_slot > 0:
