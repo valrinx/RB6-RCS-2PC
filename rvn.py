@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
-import sys, json, os, socket, time, random
+import sys, json, os, socket, time, random, shutil
 from contextlib import asynccontextmanager
 
 # ── Optional platform libs ────────────────────────────────────────────────────
@@ -349,16 +349,70 @@ def get_active_controller():
 # ══════════════════════════════════════════════════════════════════════════════
 #  Config helpers
 # ══════════════════════════════════════════════════════════════════════════════
+def _is_packaged_runtime() -> bool:
+    """True for PyInstaller/cx_Freeze-style frozen and Nuitka-compiled runtime."""
+    return bool(getattr(sys, "frozen", False) or "__compiled__" in globals())
+
+
 def _base_dir():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+    override = os.environ.get("RVN_DATA_DIR", "").strip()
+    if override:
+        return os.path.abspath(override)
+    if _is_packaged_runtime():
+        appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if appdata:
+            return os.path.join(appdata, "RVN")
+        return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
-CONFIG_DIR = os.path.join(_base_dir(), 'configs')
+
+def _migrate_exe_configs_once():
+    """If appdata configs/ is empty but exe-side configs/ has JSON, copy once."""
+    if not _is_packaged_runtime():
+        return
+    legacy_dir = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "configs")
+    if not os.path.isdir(legacy_dir):
+        return
+    try:
+        if any(f.endswith(".json") for f in os.listdir(CONFIG_DIR)):
+            return
+        legacy_json = [f for f in os.listdir(legacy_dir) if f.endswith(".json")]
+        if not legacy_json:
+            return
+        for name in legacy_json:
+            shutil.copy2(os.path.join(legacy_dir, name), os.path.join(CONFIG_DIR, name))
+    except OSError:
+        pass
+
+
+_data_root = _base_dir()
+CONFIG_DIR = os.path.join(_data_root, "configs")
 os.makedirs(CONFIG_DIR, exist_ok=True)
+_migrate_exe_configs_once()
 DEFAULT_CONFIG_FILE = "default.json"
 
 def get_config_path(f):  return os.path.join(CONFIG_DIR, f)
+
+
+def _ensure_default_config_file():
+    """Create default.json once if missing. Never overwrites — safe after exe rebuilds."""
+    p = get_config_path(DEFAULT_CONFIG_FILE)
+    if os.path.exists(p):
+        return
+    tmp = p + ".tmp"
+    try:
+        with open(tmp, "w") as fh:
+            json.dump({}, fh, indent=4)
+        os.replace(tmp, p)
+    except OSError as e:
+        print(f"[CONFIG] Could not create {DEFAULT_CONFIG_FILE}: {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+_ensure_default_config_file()
 
 def read_configs(config_file=None):
     f = config_file or DEFAULT_CONFIG_FILE
@@ -1617,7 +1671,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </button>
     </div>
     <div class="hint" style="margin-bottom:10px;">
-      พิมพ์ชื่ออาวุธในช่องค้นหาแต่ละ slot แล้วเลือกจากรายการ<br>
+      Search weapon name per slot. | Select from the list.<br>
       Press <b style="color:#fff;">1</b>/<b style="color:#fff;">2</b>/… in-game → RCS switches automatically.
     </div>
     <div id="ws-slots-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
@@ -2675,8 +2729,29 @@ def get_local_ip():
 
 if __name__ == "__main__":
     ip = get_local_ip()
-    print(f"\n  ┌─ RVN v7.0 ─────────────────────────────────────────┐")
-    print(f"  │  Local  : http://localhost:8000                    │")
-    print(f"  │  Network: http://{ip}:8000        │")
-    print(f"  └────────────────────────────────────────────────────┘\n")
+    info_lines = [
+        "RVN v7.0",
+        "Local  : http://localhost:8000",
+        f"Network: http://{ip}:8000",
+    ]
+    if _is_packaged_runtime():
+        info_lines.append(f"Configs: {CONFIG_DIR}")
+
+    width = max(len(line) for line in info_lines)
+    border = "+" + ("-" * (width + 2)) + "+"
+
+    print()
+    print(border)
+    for line in info_lines:
+        print(f"| {line.ljust(width)} |")
+    print(border)
+    print()
+    if _is_packaged_runtime():
+        import webbrowser
+
+        def _open_browser():
+            time.sleep(1.25)
+            webbrowser.open("http://127.0.0.1:8000/")
+
+        threading.Thread(target=_open_browser, daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
