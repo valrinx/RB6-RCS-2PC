@@ -2170,39 +2170,106 @@ function buildWsGrid() {
   const grid = $('ws-slots-grid');
   grid.innerHTML = '';
 
-  // Build a shared datalist for all slot search inputs
+  // Remove old datalist if any
   let dl = document.getElementById('ws-datalist');
   if(dl) dl.remove();
-  dl = document.createElement('datalist');
-  dl.id = 'ws-datalist';
-  if(typeof allKeys !== 'undefined'){
-    for(const k of allKeys){
-      const cfg = cache[k];
-      const name = typeof cfg==='object'&&cfg.name ? cfg.name : k;
-      const opt = document.createElement('option');
-      opt.value = name;          // display name
-      opt.dataset.key = k;      // real key stored in dataset
-      dl.appendChild(opt);
-    }
+
+  // Inject custom dropdown styles once
+  if(!document.getElementById('ws-dd-style')){
+    const st = document.createElement('style');
+    st.id = 'ws-dd-style';
+    st.textContent = `
+      .ws-dd-wrap { position:relative; margin-bottom:7px; }
+      .ws-dd-input {
+        width:100%; box-sizing:border-box;
+        font-size:.72rem; padding:5px 26px 5px 8px;
+        background:var(--bg); border:1px solid var(--bd2);
+        border-radius:6px; color:var(--tx);
+        font-family:var(--sa); outline:none;
+        cursor:pointer; white-space:nowrap;
+        overflow:hidden; text-overflow:ellipsis;
+        transition:border-color .15s;
+      }
+      .ws-dd-input:focus { border-color:var(--ac); }
+      .ws-dd-arrow {
+        position:absolute; right:7px; top:50%;
+        transform:translateY(-50%);
+        pointer-events:none; color:var(--mu);
+        font-size:.6rem; line-height:1;
+      }
+      .ws-dd-clr {
+        position:absolute; right:20px; top:50%;
+        transform:translateY(-50%);
+        background:transparent; border:none;
+        color:var(--mu); font-size:.85rem;
+        cursor:pointer; padding:0 2px; line-height:1;
+        display:none;
+      }
+      .ws-dd-clr.visible { display:block; }
+      .ws-dd-list {
+        position:absolute; top:calc(100% + 3px); left:0; right:0;
+        background:#1a1a1f; border:1px solid var(--ac);
+        border-radius:7px; z-index:9999;
+        max-height:220px; overflow-y:auto;
+        box-shadow:0 6px 24px rgba(0,0,0,.6);
+        display:none; flex-direction:column;
+        scrollbar-width:thin; scrollbar-color:var(--bd2) transparent;
+      }
+      .ws-dd-list.open { display:flex; }
+      .ws-dd-search {
+        padding:6px 8px; font-size:.7rem;
+        background:transparent; border:none;
+        border-bottom:1px solid var(--bd2);
+        color:var(--tx); font-family:var(--sa);
+        outline:none; position:sticky; top:0;
+        background:#1a1a1f;
+      }
+      .ws-dd-items { overflow-y:auto; flex:1; }
+      .ws-dd-item {
+        padding:5px 10px; font-size:.72rem;
+        font-family:var(--sa); color:var(--tx);
+        cursor:pointer; white-space:nowrap;
+        overflow:hidden; text-overflow:ellipsis;
+        transition:background .1s;
+      }
+      .ws-dd-item:hover, .ws-dd-item.active { background:rgba(255,255,255,.07); color:var(--ac); }
+      .ws-dd-item.selected { color:var(--ac); font-weight:600; }
+      .ws-dd-empty { padding:8px 10px; font-size:.68rem; color:var(--mu); font-family:var(--sa); }
+    `;
+    document.head.appendChild(st);
   }
-  document.body.appendChild(dl);
 
   // Helper: resolve display name → key
   function nameToKey(name){
     if(!name) return null;
     const lower = name.toLowerCase();
-    // exact match first
     if(typeof allKeys!=='undefined'){
       for(const k of allKeys){
         const cfg=cache[k];
         const n=typeof cfg==='object'&&cfg.name ? cfg.name : k;
         if(n.toLowerCase()===lower) return k;
       }
-      // fallback: key itself
       if(allKeys.includes(name)) return name;
     }
     return null;
   }
+
+  // Helper: build weapon name list
+  function getWeaponList(filter=''){
+    if(typeof allKeys==='undefined') return [];
+    const q = filter.toLowerCase();
+    return allKeys
+      .map(k=>{ const cfg=cache[k]; return {key:k, name:typeof cfg==='object'&&cfg.name?cfg.name:k}; })
+      .filter(w=>!q||w.name.toLowerCase().includes(q));
+  }
+
+  // Close all open dropdowns
+  function closeAllDd(){
+    document.querySelectorAll('.ws-dd-list.open').forEach(el=>el.classList.remove('open'));
+  }
+  document.removeEventListener('click', window._wsDdClose||null);
+  window._wsDdClose = (e)=>{ if(!e.target.closest('.ws-dd-wrap')) closeAllDd(); };
+  document.addEventListener('click', window._wsDdClose);
 
   for(let s=1;s<=5;s++){
     const wrap = document.createElement('div');
@@ -2213,54 +2280,113 @@ function buildWsGrid() {
     lbl.style.cssText='font-family:var(--mo);font-size:.58rem;color:var(--mu);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px;';
     lbl.textContent='Slot '+s+' [key '+s+']';
 
-    // Search input wrapper
-    const inputWrap = document.createElement('div');
-    inputWrap.style.cssText='position:relative;margin-bottom:7px;';
+    // ── Custom dropdown ───────────────────────────────────────────────────────
+    const ddWrap = document.createElement('div');
+    ddWrap.className = 'ws-dd-wrap';
 
-    const inp = document.createElement('input');
-    inp.type='text';
-    inp.id='ws-inp-'+s;
-    inp.setAttribute('list','ws-datalist');
-    inp.autocomplete='off';
-    inp.placeholder='Search weapon name…';
-    inp.style.cssText='width:100%;font-size:.72rem;padding:5px 7px;background:var(--bg);border:1px solid var(--bd2);border-radius:6px;color:var(--tx);font-family:var(--sa);outline:none;';
+    const inp = document.createElement('div');
+    inp.id = 'ws-inp-'+s;
+    inp.className = 'ws-dd-input';
+    inp.tabIndex = 0;
 
-    // Pre-fill with current assigned name
+    const arrow = document.createElement('span');
+    arrow.className = 'ws-dd-arrow';
+    arrow.textContent = '▾';
+
+    const clrBtn = document.createElement('button');
+    clrBtn.className = 'ws-dd-clr';
+    clrBtn.textContent = '×';
+    clrBtn.title = 'Clear slot';
+
+    // Dropdown panel
+    const ddList = document.createElement('div');
+    ddList.className = 'ws-dd-list';
+
+    const ddSearch = document.createElement('input');
+    ddSearch.type = 'text';
+    ddSearch.className = 'ws-dd-search';
+    ddSearch.placeholder = '🔍  search…';
+    ddSearch.autocomplete = 'off';
+
+    const ddItems = document.createElement('div');
+    ddItems.className = 'ws-dd-items';
+
+    ddList.appendChild(ddSearch);
+    ddList.appendChild(ddItems);
+
+    // Pre-fill
     const assignedKey = wsSlots[s];
+    let currentKey = assignedKey || null;
     if(assignedKey){
       const cfg=cache[assignedKey];
-      inp.value = typeof cfg==='object'&&cfg.name ? cfg.name : assignedKey;
+      inp.textContent = typeof cfg==='object'&&cfg.name ? cfg.name : assignedKey;
+      inp.style.color = 'var(--tx)';
+      clrBtn.classList.add('visible');
+    } else {
+      inp.textContent = 'Search weapon name…';
+      inp.style.color = 'var(--mu)';
     }
 
-    // Clear button (×)
-    const clrBtn = document.createElement('button');
-    clrBtn.textContent='×';
-    clrBtn.title='Clear slot';
-    clrBtn.style.cssText='position:absolute;right:5px;top:50%;transform:translateY(-50%);background:transparent;border:none;color:var(--mu);font-size:.9rem;cursor:pointer;padding:0 3px;line-height:1;';
+    function renderItems(filter=''){
+      ddItems.innerHTML='';
+      const list = getWeaponList(filter);
+      if(!list.length){
+        const empty = document.createElement('div');
+        empty.className='ws-dd-empty';
+        empty.textContent='No weapons found';
+        ddItems.appendChild(empty);
+        return;
+      }
+      list.forEach(w=>{
+        const item = document.createElement('div');
+        item.className='ws-dd-item'+(w.key===currentKey?' selected':'');
+        item.textContent = w.name;
+        item.title = w.name;
+        item.onmousedown=(e)=>{
+          e.preventDefault();
+          currentKey = w.key;
+          inp.textContent = w.name;
+          inp.style.color = 'var(--tx)';
+          clrBtn.classList.add('visible');
+          ddList.classList.remove('open');
+          assignSlot(s, w.key);
+        };
+        ddItems.appendChild(item);
+      });
+    }
+
+    inp.onclick=(e)=>{
+      e.stopPropagation();
+      const isOpen = ddList.classList.contains('open');
+      closeAllDd();
+      if(!isOpen){
+        ddSearch.value='';
+        renderItems('');
+        ddList.classList.add('open');
+        setTimeout(()=>ddSearch.focus(),30);
+      }
+    };
+    inp.onkeydown=(e)=>{ if(e.key==='Enter'||e.key===' '){ inp.onclick(e); } };
+
+    ddSearch.oninput=()=>renderItems(ddSearch.value);
+    ddSearch.onkeydown=(e)=>{
+      if(e.key==='Escape'){ ddList.classList.remove('open'); inp.focus(); }
+    };
+
     clrBtn.onclick=(e)=>{
-      e.preventDefault();
-      inp.value='';
+      e.stopPropagation();
+      currentKey=null;
+      inp.textContent='Search weapon name…';
+      inp.style.color='var(--mu)';
+      clrBtn.classList.remove('visible');
+      closeAllDd();
       assignSlot(s,null);
     };
 
-    inputWrap.appendChild(inp);
-    inputWrap.appendChild(clrBtn);
-
-    // Commit on change/blur
-    function commitInp(inpRef, slotNum){
-      const key=nameToKey(inpRef.value.trim());
-      if(key){
-        // show canonical name
-        const cfg=cache[key];
-        inpRef.value=typeof cfg==='object'&&cfg.name ? cfg.name : key;
-        assignSlot(slotNum,key);
-      } else if(!inpRef.value.trim()){
-        assignSlot(slotNum,null);
-      }
-      // invalid text: leave as-is so user can correct
-    }
-    inp.addEventListener('change', ()=>commitInp(inp, s));
-    inp.addEventListener('blur',   ()=>commitInp(inp, s));
+    ddWrap.appendChild(inp);
+    ddWrap.appendChild(clrBtn);
+    ddWrap.appendChild(arrow);
+    ddWrap.appendChild(ddList);
 
     // Rapid Fire row
     const rfRow = document.createElement('div');
@@ -2307,7 +2433,7 @@ function buildWsGrid() {
     rfRow.appendChild(rfClear);
 
     wrap.appendChild(lbl);
-    wrap.appendChild(inputWrap);
+    wrap.appendChild(ddWrap);
     wrap.appendChild(rfRow);
     grid.appendChild(wrap);
   }
