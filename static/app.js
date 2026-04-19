@@ -1103,6 +1103,8 @@ function renderMacros(macros, playing, recording) {
               data-name="${enc}" data-loop="${!!m.loop}" data-playing="${isPlaying}">${playLbl}</button>
       <button class="btn btn-s mac-edit-btn"  style="font-size:.6rem;padding:4px 8px;"
               data-name="${enc}">⏱ Delays</button>
+      <button class="btn btn-s mac-more-btn"  style="font-size:.6rem;padding:4px 8px;"
+              data-name="${enc}">⋯</button>
       <button class="btn btn-d mac-del-btn"   style="font-size:.6rem;padding:4px 8px;"
               data-name="${enc}">✕</button>
     </div>`;
@@ -1119,9 +1121,98 @@ function renderMacros(macros, playing, recording) {
   el.querySelectorAll('.mac-edit-btn').forEach(btn=>{
     btn.onclick = ()=> openDelayEditor(decodeURIComponent(btn.dataset.name));
   });
+  el.querySelectorAll('.mac-more-btn').forEach(btn=>{
+    btn.onclick = ()=> macroMoreMenu(decodeURIComponent(btn.dataset.name), macros);
+  });
   el.querySelectorAll('.mac-del-btn').forEach(btn=>{
     btn.onclick = ()=> deleteMacro(decodeURIComponent(btn.dataset.name));
   });
+}
+
+function macroMoreMenu(name, macros) {
+  const m = (macros||{})[name];
+  if (!m) return;
+  const act = prompt(
+    `Macro: ${name}\n\nChoose:\n` +
+    `1 = Export (copy JSON / download)\n` +
+    `2 = Rename\n` +
+    `3 = Duplicate\n` +
+    `4 = Import (paste JSON)\n\n` +
+    `Enter 1-4 (Cancel = close)`
+  );
+  if (!act) return;
+  if (act === '1') return exportMacro(name);
+  if (act === '2') return renameMacro(name);
+  if (act === '3') return duplicateMacro(name);
+  if (act === '4') return importMacroPrompt();
+}
+
+function exportMacro(name) {
+  fetch(`/macros/${encodeURIComponent(name)}/export`)
+    .then(r=>r.json()).then(d=>{
+      const txt = JSON.stringify(d.macro, null, 2);
+      (navigator.clipboard?.writeText ? navigator.clipboard.writeText(txt) : Promise.reject())
+        .then(()=>toast('Copied macro JSON'))
+        .catch(()=>{
+          const blob = new Blob([txt], {type:'application/json'});
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = `${name}.macro.json`;
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+          toast('Downloaded macro JSON');
+        });
+    })
+    .catch(()=>showWarn('Export failed'));
+}
+
+function renameMacro(name) {
+  const nn = prompt(`Rename macro:\n\n${name}\n\nto:`, name);
+  if (!nn) return;
+  fetch(`/macros/${encodeURIComponent(name)}/rename`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({new_name: nn})
+  }).then(r=>{
+    if (!r.ok) return r.json().then(e=>{ throw new Error(e.detail||'Rename failed'); });
+    return r.json();
+  }).then(()=>{ fetchMacros(); toast('Renamed'); })
+    .catch(e=>showWarn(e.message||'Rename failed'));
+}
+
+function duplicateMacro(name) {
+  const nn = prompt(`Duplicate macro:\n\n${name}\n\nas:`, `${name} (copy)`);
+  if (!nn) return;
+  fetch(`/macros/${encodeURIComponent(name)}/duplicate`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({new_name: nn})
+  }).then(r=>{
+    if (!r.ok) return r.json().then(e=>{ throw new Error(e.detail||'Duplicate failed'); });
+    return r.json();
+  }).then(()=>{ fetchMacros(); toast('Duplicated'); })
+    .catch(e=>showWarn(e.message||'Duplicate failed'));
+}
+
+function importMacroPrompt() {
+  const raw = prompt('Paste macro JSON (object with name/key/loop/steps):');
+  if (!raw) return;
+  let macro;
+  try { macro = JSON.parse(raw); }
+  catch { showWarn('Invalid JSON'); return; }
+  const name = (macro?.name||'').trim();
+  if (!name) { showWarn('Macro JSON must include \"name\"'); return; }
+  fetch('/macros/import', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      name,
+      key: macro.key || null,
+      loop: !!macro.loop,
+      steps: Array.isArray(macro.steps) ? macro.steps : []
+    })
+  }).then(r=>{
+    if (!r.ok) return r.json().then(e=>{ throw new Error(e.detail||'Import failed'); });
+    return r.json();
+  }).then(()=>{ fetchMacros(); toast('Imported'); })
+    .catch(e=>showWarn(e.message||'Import failed'));
 }
 
 function toggleMacro(name, loop, playing) {
@@ -1276,6 +1367,8 @@ function openDelayEditor(name) {
     if (!m) { showWarn('Macro not found'); return; }
     _delaySteps = JSON.parse(JSON.stringify(m.steps||[]));
     $('delay-macro-name').textContent = name;
+    // Keep insert UI bounds sane
+    if ($('delay-insert-idx')) $('delay-insert-idx').value = '1';
     renderDelaySteps();
     $('delay-editor').style.display = 'flex';
   });
@@ -1346,6 +1439,15 @@ $('delay-add-btn').onclick = ()=>{
   const ms = Math.max(1, parseInt($('delay-add-ms').value)||500);
   _delaySteps.push({type:'delay', dt_ms: ms});
   renderDelaySteps();
+};
+
+$('delay-insert-btn').onclick = ()=>{
+  const idxRaw = parseInt(($('delay-insert-idx')?.value)||'1');
+  const ms = Math.max(1, parseInt(($('delay-insert-ms')?.value)||'250'));
+  const idx = Math.min(Math.max(1, isNaN(idxRaw) ? 1 : idxRaw), _delaySteps.length + 1) - 1; // 1-based → 0-based
+  _delaySteps.splice(idx, 0, {type:'delay', dt_ms: ms});
+  renderDelaySteps();
+  toast(`Inserted delay at step ${idx+1}`, 'var(--yl)');
 };
 
 $('delay-save-btn').onclick = ()=>{
