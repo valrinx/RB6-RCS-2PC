@@ -1,0 +1,46 @@
+{
+    "Beryl M762": {
+        "name": "Beryl M762",
+        "tags": {
+            "barrel": "Muzzle",
+            "scope": "Holo",
+            "grip": "Vertical"
+        },
+        "pull_down": 12.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 1.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0,
+        "pull_down_curve": [
+            18.0,
+            18.0,
+            18.0,
+            18.0,
+            18.0
+        ],
+        "hip_pull_down": 0.0,
+        "hip_horizontal": 0.0
+    },
+    "Beryl M762 No Attachment": {
+        "name": "Beryl M762 No Attachment",
+        "tags": {
+            "scope": "Holo"
+        },
+        "pull_down": 19.0,
+        "vertical_delay_ms": 0,
+        "vertical_duration_ms": 0,
+        "horizontal": 1.0,
+        "horizontal_delay_ms": 0,
+        "horizontal_duration_ms": 0,
+        "pull_down_curve": [
+            18.0,
+            18.0,
+            18.0,
+            18.0,
+            18.0
+        ],
+        "hip_pull_down": 0.0,
+        "hip_horizontal": 0.0
+    }
+}
