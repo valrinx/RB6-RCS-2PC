@@ -1542,6 +1542,37 @@ async def status():
     s["active_slot_config"] = slots.get(active) if active > 0 else None
     return s
 
+
+@app.get("/diag")
+async def diag():
+    """Lightweight diagnostics for troubleshooting packaging and paths."""
+    try:
+        exe = os.path.abspath(sys.executable)
+    except Exception:
+        exe = None
+    try:
+        argv0 = os.path.abspath(sys.argv[0]) if sys.argv else None
+    except Exception:
+        argv0 = None
+
+    return {
+        "version": "8.3",
+        "packaged": _is_packaged_runtime(),
+        "nuitka": ("__compiled__" in globals()),
+        "pyinstaller_meipass": getattr(sys, "_MEIPASS", None),
+        "exe": exe,
+        "argv0": argv0,
+        "res_dir": str(RES_DIR),
+        "static_dir": str(STATIC_DIR),
+        "static_exists": STATIC_DIR.exists(),
+        "template_file": str(TEMPLATE_FILE),
+        "template_exists": TEMPLATE_FILE.exists(),
+        "data_root": _data_root,
+        "config_dir": CONFIG_DIR,
+        "settings_file": SETTINGS_FILE,
+        "macros_file": MACROS_FILE,
+    }
+
 @app.post("/toggle")
 async def toggle():
     return {"is_enabled": app_state.toggle_enabled()}
