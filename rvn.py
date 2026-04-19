@@ -1439,9 +1439,25 @@ def mouse_control_loop():
 #  FastAPI
 # ══════════════════════════════════════════════════════════════════════════════
 app = FastAPI(lifespan=lifespan)
-BASE_DIR = Path(__file__).resolve().parent
-TEMPLATE_FILE = BASE_DIR / "templates" / "index.html"
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+def _resource_base_dir() -> Path:
+    """
+    Resolve bundled resource base directory.
+
+    - Source run: beside this file.
+    - Onefile builds (Nuitka/PyInstaller): resources are typically extracted to a temp dir
+      exposed via sys._MEIPASS; if not present, fall back to executable dir.
+    """
+    if _is_packaged_runtime():
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+RES_DIR = _resource_base_dir()
+TEMPLATE_FILE = RES_DIR / "templates" / "index.html"
+STATIC_DIR = RES_DIR / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.websocket("/ws")
@@ -2279,6 +2295,11 @@ async def update_macro_steps(name: str, req: MacroStepsUpdate):
 
 @app.get("/", response_class=HTMLResponse)
 async def ui():
+    if not TEMPLATE_FILE.exists():
+        raise HTTPException(
+            500,
+            f"UI template missing: {TEMPLATE_FILE}. Ensure templates/ is bundled with the build.",
+        )
     return HTMLResponse(TEMPLATE_FILE.read_text(encoding="utf-8"))
 
 
