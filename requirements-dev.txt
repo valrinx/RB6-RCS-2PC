@@ -7,4 +7,6 @@
 nuitka
 ordered-set
 zstandard
+ruff
+pre-commit
 
