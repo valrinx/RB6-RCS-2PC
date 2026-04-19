@@ -882,6 +882,45 @@ class AppState:
 
 app_state = AppState()
 
+def _ensure_current_config_file_valid(prefer_non_default_if_empty: bool = False):
+    """
+    Ensure AppState.current_config_file points to an existing config file.
+
+    When running from source with bundled example profiles, default.json may be empty.
+    In that case, optionally select the first non-default profile so the UI isn't blank.
+    """
+    try:
+        current = app_state.get_current_config_file() or DEFAULT_CONFIG_FILE
+    except Exception:
+        current = DEFAULT_CONFIG_FILE
+
+    # Fix invalid/missing file references (e.g. settings.json points to a deleted profile)
+    if not os.path.exists(get_config_path(current)):
+        app_state.current_config_file = DEFAULT_CONFIG_FILE
+        current = DEFAULT_CONFIG_FILE
+
+    if prefer_non_default_if_empty and current == DEFAULT_CONFIG_FILE:
+        try:
+            cfgs = read_configs(DEFAULT_CONFIG_FILE)
+        except Exception:
+            cfgs = {}
+        if not cfgs:
+            # Pick a non-default config file that actually has entries (best-effort)
+            others = [f for f in list_config_files() if f.endswith(".json") and f != DEFAULT_CONFIG_FILE]
+            best = None
+            best_count = -1
+            for f in others:
+                try:
+                    c = read_configs(f)
+                    n = len(c) if isinstance(c, dict) else 0
+                except Exception:
+                    n = 0
+                if n > best_count:
+                    best_count = n
+                    best = f
+            if best and best_count > 0:
+                app_state.current_config_file = best
+
 
 # ── Settings helper used by AppState.persist() ────────────────────────────────
 def _get_slot_settings() -> dict:
@@ -1047,11 +1086,13 @@ def _restore_settings():
     d = load_settings()
     if not d:
         print("[SETTINGS] No saved settings found — using defaults")
+        _ensure_current_config_file_valid(prefer_non_default_if_empty=True)
         return
     try:
         if "app" in d:
             app_state.from_settings(d["app"])
             print("[SETTINGS] App settings restored")
+        _ensure_current_config_file_valid(prefer_non_default_if_empty=False)
         if "weapon_slots" in d:
             ws = d["weapon_slots"]
             if "enabled" in ws:
