@@ -18,44 +18,6 @@ Changes from v8.2 (v8.3):
     when recording is detected as stopped.
   • OPT: Hotkey listener sleep reduced from 16ms to 10ms (~100Hz) — lower
     average key-press latency with negligible CPU impact.
-
-Changes from v8.1 (v8.2):
-  • REMOVED: Weapon Auto-Detect (Pixel Color) — PixelDetector class, all
-    /pixel-detect/* endpoints, PixelDetectConfig model, and UI card removed.
-  • FIX: Recoil loop restored to correct v8.0 behavior — attempts to add
-    real-time sensitivity scaling to the control loop introduced a deadlock
-    (threading.Lock non-reentrant) then a NameError (_sens_scale undefined),
-    both silently caught by the loop's except clause, causing recoil to stop
-    working entirely. The loop is now identical to v8.0.
-  • CHANGED: Sensitivity Scaling is now a client-side calculator only.
-    Enter your DPI + in-game sens + a reference pull-down value, click
-    Calculate, and apply the result manually to the pull-down slider.
-    This matches the original design intent (pre-compute, then save config)
-    and avoids any runtime interference with the recoil loop.
-  • FIX: /import endpoint now uses a Pydantic model (ImportRequest) instead
-    of raw dict — FastAPI was silently rejecting requests in strict mode.
-  • FIX: Removed dead AppState._auto_persist inner function.
-
-Changes from v7.1 (v8.0):
-  • NEW: Persistent settings — AppState saved to settings.json on every change,
-    restored automatically on startup (controller type, kmbox IP/port/uuid,
-    toggle button, trigger mode, beep, rapid fire, hip fire, humanize, weapon slots)
-  • NEW: KMBox auto-reconnect — background thread detects disconnect and reconnects
-    automatically with exponential backoff (no more manual reconnect button needed)
-  • OPT: KMBox monitor now queries all buttons in a single bitmask UDP packet
-    instead of 5 separate queries per poll (~5x less UDP traffic, ~40ms → ~8ms latency)
-  • NEW: Config Import/Export — download all profiles as a ZIP, import ZIP to restore
-  • NEW: Curve Visualizer — realtime animated preview of pull-down curve while firing
-  • NEW: Sensitivity Scaling — enter DPI + in-game sens, pull-down auto-scales
-  • NEW: Macro system — record mouse-move sequences and replay them on a key
-  • NEW: Unit tests — run python rvn.py --test to validate AppState + KMBox packets
-
-Changes from v7.0 (v7.1):
-  • FIX: Per-slot Rapid Fire no longer bleeds into slots that have RF off
-
-Changes from v6.0 (v7.0):
-  • FIX: Weapon Slot dropdowns now correctly show saved gun configs
-  • NEW: Per-slot Rapid Fire
 """
 
 import threading
