@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 REM One-time: pip install -r requirements.txt
-REM          pip install nuitka ordered-set zstandard
+REM          pip install -r requirements-dev.txt
 
 REM Remove previous dist\RVN.exe if present
 if exist "dist\RVN.exe" del /f /q "dist\RVN.exe" 2>nul
