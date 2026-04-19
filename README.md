@@ -7,18 +7,16 @@
 > The MAKXD (new makcu) will have built-in advanced RCS, which may eventually make this tool obsolete for makcu users. Software Direct mode (1-PC, no hardware) is still fully supported.
 
 > [!NOTE]
-> **RVN — Recoil Control System v7.1**
+> **RVN — Recoil Control System v8.3**
 >
-> **Changes from v7.0:**
-> - **FIX:** Per-slot Rapid Fire no longer bleeds into slots that have RF off
->   (switching to a non-RF slot now correctly restores the global RF baseline
->   instead of carrying over the previous slot's RF state)
->
-> **Changes from v6.0 (v7.0):**
-> - **FIX:** Weapon Slot dropdowns now correctly show saved gun configs
->   (buildWsGrid was called before fetchConfigs finished loading)
-> - **NEW:** Per-slot Rapid Fire — each weapon slot can have its own RF setting
->   (e.g. Slot 1: RF OFF, Slot 2: RF ON 80ms); slots without an override inherit the global Rapid Fire setting
+> **Highlights (v8.x):**
+> - **NEW:** Persistent Settings (saved to `settings.json`)
+> - **NEW:** KMBox auto-reconnect + lower-latency button polling
+> - **NEW:** Config Import/Export (ZIP)
+> - **NEW:** Curve Visualizer + Sensitivity Scaling calculator (client-side)
+> - **NEW:** Macro system (record + replay)
+> - **NEW:** Unit tests (`python rvn.py --test`)
+> - **OPT:** Macro hotkey listener caching (v8.3)
     
 A game-agnostic recoil control script with a web UI. Supports MAKCU, KMBox, and Software Direct (no hardware, 1-PC).
 
@@ -80,6 +78,14 @@ The console will print the URLs to open:
 
 Open that URL in any browser — works from your phone too.
 
+## Tests
+
+Run the built-in unit tests:
+
+```bash
+python rvn.py --test
+```
+
 ## Controls
 
 | Setting | Description |
@@ -122,9 +128,32 @@ game:CS2   attach:Silencer
 
 Configs are stored in the `configs/` folder as `.json` files. Create separate profiles per game from the Settings → Profile panel.
 
+## Windows user data location
+
+When using the packaged build, user configs live under:
+
+- `%LOCALAPPDATA%\RVN\configs`
+
 ## Accessing from Another Device
 
 Both devices must be on the same network (same Wi-Fi or LAN). Use the Network IP shown in the console, on port 8000.
+
+## Build (Nuitka)
+
+This repo includes `build_nuitka.bat` to produce `dist\RVN.exe`.
+
+One-time setup:
+
+```bash
+pip install -r requirements.txt
+pip install nuitka ordered-set zstandard
+```
+
+Build:
+
+```bat
+build_nuitka.bat
+```
 
 ## Contributors
 
