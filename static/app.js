@@ -1396,6 +1396,35 @@ $('import-file').onchange=function(){
 };
 
 // ══════════════════════════════════════════════════════════════════════════
+//  Diagnostics
+// ══════════════════════════════════════════════════════════════════════════
+function showDiag() {
+  const out = $('diag-out');
+  const copyBtn = $('diag-copy-btn');
+  out.style.display = 'block';
+  out.textContent = 'Loading…';
+  fetch('/diag').then(r=>r.json()).then(d=>{
+    const txt = JSON.stringify(d, null, 2);
+    out.textContent = txt;
+    copyBtn.style.display = 'inline-block';
+  }).catch(()=>{
+    out.textContent = 'Failed to load diagnostics.';
+  });
+}
+const diagBtn = $('diag-btn');
+if (diagBtn) diagBtn.onclick = showDiag;
+const diagCopyBtn = $('diag-copy-btn');
+if (diagCopyBtn) diagCopyBtn.onclick = async () => {
+  const txt = $('diag-out')?.textContent || '';
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast('Copied diagnostics');
+  } catch {
+    toast('Copy failed', 'var(--rd)');
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════
 //  v8.0 — Visualizer status hook (driven by getStatus poll)
 // ══════════════════════════════════════════════════════════════════════════
 function onStatusUpdate(s) {
