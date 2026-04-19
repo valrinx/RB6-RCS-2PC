@@ -173,6 +173,30 @@ Build:
 build_nuitka.bat
 ```
 
+## Releases (GitHub)
+
+This repo includes automation to build and attach `RVN.exe` to GitHub Releases.
+
+- **CI artifact on push/PR**: workflow `CI` builds `RVN.exe` and uploads it as an artifact.
+- **Release on tag**: push a tag like `v8.3` and the workflow `Release` will:
+  - build `dist/RVN.exe`
+  - create a GitHub Release
+  - attach `RVN.exe` to the release assets
+
+Example:
+
+```bash
+git tag v8.3
+git push origin v8.3
+```
+
+## Diagnostics
+
+If a packaged build can’t find `static/` or `templates/`:
+
+- Open the UI → Tools → **Diagnostics** → **Show**
+- Or open `http://localhost:8000/diag`
+
 ## Contributors
 
 - secretlay3r — code cleanup
