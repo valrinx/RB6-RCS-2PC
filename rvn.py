@@ -24,7 +24,6 @@ import threading
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
@@ -2314,6 +2313,12 @@ async def macro_record_discard():
 class MacroStepsUpdate(BaseModel):
     steps: List[dict]
 
+class MacroRename(BaseModel):
+    new_name: str
+
+class MacroDuplicate(BaseModel):
+    new_name: str
+
 class MacroRecordKeyConfig(BaseModel):
     key:         Optional[str]  = None   # None or "" = disable record hotkey
     trigger_key: Optional[str]  = None   # hotkey assigned to the saved macro
@@ -2347,6 +2352,59 @@ async def update_macro_steps(name: str, req: MacroStepsUpdate):
     macros[name]["steps"] = req.steps
     _write_macros(macros)
     return {"saved": name, "steps": len(req.steps)}
+
+
+@app.get("/macros/{name}/export")
+async def export_macro(name: str):
+    """Export a single macro as JSON."""
+    macros = _read_macros()
+    if name not in macros:
+        raise HTTPException(404, "Macro not found")
+    return {"macro": macros[name]}
+
+
+@app.post("/macros/import")
+async def import_macro(req: MacroSave):
+    """Import a single macro (same payload shape as MacroSave)."""
+    if not req.name.strip():
+        raise HTTPException(400, "Name required")
+    macros = _read_macros()
+    macros[req.name] = {"name": req.name, "key": req.key, "loop": req.loop, "steps": req.steps}
+    _write_macros(macros)
+    return {"imported": req.name}
+
+
+@app.post("/macros/{name}/rename")
+async def rename_macro(name: str, req: MacroRename):
+    macros = _read_macros()
+    if name not in macros:
+        raise HTTPException(404, "Macro not found")
+    nn = (req.new_name or "").strip()
+    if not nn:
+        raise HTTPException(400, "New name required")
+    if nn in macros and nn != name:
+        raise HTTPException(409, "Macro name already exists")
+    macro = macros.pop(name)
+    macro["name"] = nn
+    macros[nn] = macro
+    _write_macros(macros)
+    return {"renamed": name, "saved": nn}
+
+
+@app.post("/macros/{name}/duplicate")
+async def duplicate_macro(name: str, req: MacroDuplicate):
+    macros = _read_macros()
+    if name not in macros:
+        raise HTTPException(404, "Macro not found")
+    nn = (req.new_name or "").strip()
+    if not nn:
+        raise HTTPException(400, "New name required")
+    if nn in macros:
+        raise HTTPException(409, "Macro name already exists")
+    src = macros[name]
+    macros[nn] = {"name": nn, "key": src.get("key"), "loop": bool(src.get("loop", False)), "steps": list(src.get("steps", []))}
+    _write_macros(macros)
+    return {"duplicated": name, "saved": nn}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
