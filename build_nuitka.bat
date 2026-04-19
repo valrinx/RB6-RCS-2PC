@@ -42,6 +42,7 @@ python -m nuitka ^
   --include-package=colorama ^
   --include-data-dir=templates=templates ^
   --include-data-dir=static=static ^
+  --include-data-dir=configs=configs ^
   --nofollow-import-to=makcu.test_suite ^
   --nofollow-import-to=colorama.tests ^
   rvn.py
