@@ -3486,6 +3486,8 @@ function drawCurve(){
   sorted.forEach((p,i)=>{const x=p.x*W,y=p.y*H;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});
   ctx.stroke();
   $('curve-pts').textContent=pts.length+' pts';
+  // Keep LIVE PREVIEW in sync with editor changes while idle.
+  if(!vizFiring && typeof drawVizStatic==='function') drawVizStatic();
 }
 
 function normM(e){const r=cv.getBoundingClientRect();return{x:Math.max(0,Math.min(1,(e.clientX-r.left)/r.width)),y:Math.max(0,Math.min(1,(e.clientY-r.top)/r.height))};}
