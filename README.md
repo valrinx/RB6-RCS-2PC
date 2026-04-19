@@ -49,7 +49,25 @@ Works with any game — R6, Rust, CS2, Valorant, or anything else.
 
 ## Setup
 
-Download the release, then install dependencies:
+### Quick start (Windows, from source)
+
+Create a venv and install dependencies:
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Run:
+
+```powershell
+python .\rvn.py
+```
+
+### Install (generic)
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -146,7 +164,7 @@ One-time setup:
 
 ```bash
 pip install -r requirements.txt
-pip install nuitka ordered-set zstandard
+pip install -r requirements-dev.txt
 ```
 
 Build:
