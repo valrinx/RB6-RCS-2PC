@@ -1463,13 +1463,19 @@ def _resource_base_dir() -> Path:
     Resolve bundled resource base directory.
 
     - Source run: beside this file.
-    - Onefile builds (Nuitka/PyInstaller): resources are typically extracted to a temp dir
-      exposed via sys._MEIPASS; if not present, fall back to executable dir.
+    - PyInstaller onefile: extracted payload is exposed via sys._MEIPASS.
+    - Nuitka onefile: embedded --include-data-dir assets live next to the extracted
+      main module (dirname(__file__)), not next to the outer .exe (see Nuitka manual:
+      onefile-finding-files). sys.argv[0] / sys.executable point at the .exe path.
+    - Other frozen layouts: fall back to the executable directory.
     """
     if _is_packaged_runtime():
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             return Path(meipass)
+        # Nuitka sets __compiled__ on the main module; use __file__ for bundled data.
+        if "__compiled__" in globals():
+            return Path(__file__).resolve().parent
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
 
