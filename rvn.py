@@ -456,7 +456,13 @@ def _migrate_exe_configs_once():
     if not legacy_dir:
         return
     try:
-        if any(f.endswith(".json") for f in os.listdir(CONFIG_DIR)):
+        # Consider the target "empty" if it only contains default.json.
+        # default.json is auto-created and should not block migration.
+        existing_json = [
+            f for f in os.listdir(CONFIG_DIR)
+            if f.endswith(".json") and f != DEFAULT_CONFIG_FILE
+        ]
+        if existing_json:
             return
         legacy_json = [f for f in os.listdir(legacy_dir) if f.endswith(".json")]
         if not legacy_json:
