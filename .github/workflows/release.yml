@@ -28,7 +28,7 @@ jobs:
 
       - name: Build RVN.exe (onefile)
         run: |
-          .\build_nuitka.bat
+          .\scripts\build_nuitka.bat
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
