@@ -248,6 +248,17 @@
           <input type="number" id="delay-add-ms" value="500" min="1" max="60000" style="width:80px;font-size:.72rem;">
           <span style="align-self:center;font-size:.68rem;color:var(--mu);">ms</span>
         </div>
+        <div style="margin-top:8px;display:flex;gap:8px;align-items:center;">
+          <div style="flex:1;">
+            <div class="tgrid-lbl">Insert delay at step #</div>
+            <input type="number" id="delay-insert-idx" value="1" min="1" max="9999" style="width:100%;font-size:.72rem;">
+          </div>
+          <div style="flex:1;">
+            <div class="tgrid-lbl">Delay (ms)</div>
+            <input type="number" id="delay-insert-ms" value="250" min="1" max="60000" style="width:100%;font-size:.72rem;">
+          </div>
+          <button class="btn btn-s" id="delay-insert-btn" style="flex:0 0 auto;height:34px;align-self:flex-end;">Insert</button>
+        </div>
         <div style="margin-top:10px;display:flex;gap:8px;">
           <button class="btn btn-g" id="delay-save-btn" style="flex:1;">💾 Save Changes</button>
           <button class="btn btn-d" id="delay-close-btn" style="flex:1;">Cancel</button>
