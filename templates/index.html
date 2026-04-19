@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RVN v8.3</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="w">
+  <div class="hdr">
+    <div class="logo">R<em>V</em>N</div>
+    <span class="vtag">v8.3 — RCS</span>
+    <span id="conn-dot" class="conn-dot" title="Controller connection"></span>
+  </div>
+
+  <div class="card">
+    <div class="clabel">Status</div>
+    <button id="toggle-btn">LOADING</button>
+    <div class="trow">
+      Toggle key
+      <select id="tbs">
+        <option value="MMB">Middle Mouse</option>
+        <option value="M4">M4 (Side Back)</option>
+        <option value="M5" selected>M5 (Side Forward)</option>
+      </select>
+      <button id="beep-btn" title="Beep on/off" style="margin-left:auto;padding:3px 10px;border-radius:12px;font-size:.7rem;font-family:var(--mo);cursor:pointer;border:1px solid var(--bd2);background:var(--bg);color:var(--mu);transition:all .2s;">🔔</button>
+    </div>
+  </div>
+
+  <!-- ── Feature Pills Row ─────────────────────────────────────────────────── -->
+  <div style="display:flex;gap:8px;margin-bottom:8px;">
+    <!-- Rapid Fire pill -->
+    <div class="feat-card" style="flex:1;margin-bottom:0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <span class="feat-title" style="color:var(--or);">Rapid Fire</span>
+        <button id="rf-pill" class="toggle-pill rf">
+          <span class="dot"></span><span id="rf-lbl">OFF</span>
+        </button>
+      </div>
+      <div class="hf-lbl">Interval</div>
+      <div style="display:flex;align-items:baseline;gap:4px;">
+        <!-- BUG FIX: oninput wired in JS instead of hardcoded -->
+        <input type="number" class="num num-sm" id="rf-ms" value="100" min="30" max="2000" style="width:80px;">
+        <span class="unit">ms</span>
+      </div>
+      <input type="range" id="rf-sl" min="30" max="500" value="100" style="margin-top:5px;">
+      <div class="hint" style="margin-top:4px;">30ms = ~33cps</div>
+    </div>
+
+    <!-- Hip Fire pill -->
+    <div class="feat-card" style="flex:1;margin-bottom:0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <span class="feat-title" style="color:var(--vi);">Hip Fire</span>
+        <button id="hf-pill" class="toggle-pill">
+          <span class="dot"></span><span id="hf-lbl">OFF</span>
+        </button>
+      </div>
+      <div class="hf-row" style="margin-top:0;">
+        <div>
+          <div class="hf-lbl">Pull ↓</div>
+          <input type="number" class="num num-sm" id="hf-pd" value="0" min="0" max="300" step="0.5">
+        </div>
+        <div>
+          <div class="hf-lbl">Horiz ←→</div>
+          <input type="number" class="num num-sm" id="hf-hz" value="0" min="-300" max="300" step="0.5">
+        </div>
+      </div>
+      <div class="hint" style="margin-top:5px;">When RMB is not held (no ADS)</div>
+    </div>
+  </div>
+
+  <!-- ── Weapon Slots card ──────────────────────────────────────────────────── -->
+  <div class="card" id="ws-card">
+    <div class="clabel" style="justify-content:space-between;">
+      <span>Weapon Slots <span style="color:var(--ac);font-size:.85em;">KEY 1–5</span></span>
+      <button id="ws-pill" class="toggle-pill" style="margin-left:auto;">
+        <span class="dot"></span><span id="ws-lbl">OFF</span>
+      </button>
+    </div>
+    <div class="hint" style="margin-bottom:10px;">
+      Search weapon name per slot. | Select from the list.<br>
+      Press <b style="color:#fff;">1</b>/<b style="color:#fff;">2</b>/… in-game → RCS switches automatically.
+    </div>
+    <div id="ws-slots-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      <!-- rows injected by JS -->
+    </div>
+    <div id="ws-active-badge" style="margin-top:9px;font-family:var(--mo);font-size:.64rem;color:var(--mu);">
+      Active slot: <span id="ws-active-num" style="color:var(--ac);">—</span>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="recoil">Recoil</button>
+    <button class="tab" data-tab="humanize">Humanize</button>
+    <button class="tab" data-tab="macros">Macros</button>
+    <button class="tab" data-tab="tools">Tools</button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </div>
+
+  <!-- ═══ RECOIL ════════════════════════════════════════════════════════════ -->
+  <div id="tab-recoil" class="tc active">
+    <div class="card">
+      <div class="clabel">Vertical — Pull-down <span id="cpv" class="cpill" style="display:none">CURVE</span></div>
+      <input type="number" class="num" id="sv" value="1" min="0" max="300" step="0.001">
+      <input type="range" min="0" max="300" value="1" id="sl">
+      <div class="sdiv">Vertical Timing</div>
+      <div class="tgrid">
+        <div>
+          <div class="tgrid-lbl">Delay</div>
+          <div class="num-row"><input type="number" class="num num-sm" id="vdv" value="0" min="0" max="5000"><span class="unit">ms</span></div>
+          <input type="range" min="0" max="5000" step="1" value="0" id="vds">
+        </div>
+        <div>
+          <div class="tgrid-lbl">Duration</div>
+          <div class="num-row"><input type="number" class="num num-sm" id="vduv" value="0" min="0" max="10000"><span class="unit">ms</span></div>
+          <input type="range" min="0" max="10000" step="1" value="0" id="vdus">
+        </div>
+      </div>
+      <div class="hint">Delay = wait before start · Duration = how long · 0 = unlimited</div>
+    </div>
+
+    <div class="card">
+      <div class="clabel">Horizontal <span id="cph" class="cpill" style="display:none">CURVE</span></div>
+      <input type="number" class="num" id="hv" value="0" min="-300" max="300" step="0.001">
+      <input type="range" min="-300" max="300" value="0" id="hs">
+      <div class="hint" style="margin-bottom:10px">Negative = left · Positive = right · 0 = off</div>
+      <div class="sdiv">Horizontal Timing</div>
+      <div class="tgrid">
+        <div>
+          <div class="tgrid-lbl">Delay</div>
+          <div class="num-row"><input type="number" class="num num-sm" id="dv" value="500" min="0" max="5000"><span class="unit">ms</span></div>
+          <input type="range" min="0" max="5000" step="1" value="500" id="ds">
+        </div>
+        <div>
+          <div class="tgrid-lbl">Duration</div>
+          <div class="num-row"><input type="number" class="num num-sm" id="uv" value="2000" min="0" max="10000"><span class="unit">ms</span></div>
+          <input type="range" min="0" max="10000" step="1" value="2000" id="us">
+        </div>
+      </div>
+      <div class="hint">0 Duration = entire hold</div>
+    </div>
+
+    <div class="card">
+      <div class="clabel">Recoil Curve <span style="font-size:.85em;color:var(--mu);letter-spacing:0;font-family:var(--sa);">— overrides constant value</span></div>
+      <div class="hint" style="margin-bottom:9px">Drag to draw · X = time · Y = pull strength<br>
+        <span style="color:#223a28;">— — —</span> dashed = constant &nbsp;<span style="color:#3ab070;">——</span> solid = curve</div>
+      <div class="ceditor">
+        <canvas id="curve-canvas" height="120"></canvas>
+        <div class="cacts">
+          <button class="btn btn-s" id="curve-load-btn" style="font-size:.6rem;padding:5px 9px">Decay</button>
+          <button class="btn btn-s" id="curve-flat-btn" style="font-size:.6rem;padding:5px 9px;border-color:#1a3a50;color:#60c8f0;">Flat</button>
+          <button class="btn btn-g" id="curve-apply-btn" style="font-size:.6rem;padding:5px 9px">Apply</button>
+          <button class="btn btn-d" id="curve-clear-btn" style="font-size:.6rem;padding:5px 9px">Clear</button>
+          <span id="curve-pts" style="font-size:.6rem;color:var(--mu);margin-left:auto;font-family:var(--mo)">0 pts</span>
+        </div>
+      </div>
+      <!-- v8.0 Curve Visualizer -->
+      <div class="viz-wrap" style="margin-top:10px;">
+        <canvas id="curve-viz" width="420" height="80"></canvas>
+        <span class="viz-label">LIVE PREVIEW</span>
+        <span class="viz-tick" id="viz-tick-lbl"></span>
+        <span class="viz-state" id="viz-state-lbl">Idle</span>
+      </div>
+      <div style="font-size:.62rem;color:var(--mu);margin-top:5px;line-height:1.5;">
+        Animates the curve playback in real time while firing. White line = current position.
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ MACROS ════════════════════════════════════════════════════════════ -->
+  <div id="tab-macros" class="tc">
+    <div class="card">
+      <div class="clabel">Macros</div>
+      <div class="hint" style="margin-bottom:10px;">
+        Records mouse movement, mouse clicks, and keyboard input. Replay with a hotkey or the Play button.<br>
+        <span style="color:var(--yl);">⚠ During recording — F1–F12, INS, HOME, PGUP, PGDN are reserved for hotkeys and will not be recorded.</span>
+      </div>
+
+      <div class="sdiv">Record New</div>
+      <div class="row" style="margin-bottom:8px;gap:8px;">
+        <input type="text" id="mac-name" placeholder="Macro name" style="flex:1;">
+      </div>
+      <div class="row" style="gap:8px;">
+        <button class="btn" id="mac-rec-btn" style="flex:1;background:#0d0404;border-color:#3a0808;color:#ff6060;">⏺ Record</button>
+        <button class="btn btn-d" id="mac-discard-btn" style="flex:0 0 auto;display:none;">✕ Discard</button>
+      </div>
+      <div id="mac-rec-status" style="font-family:var(--mo);font-size:.62rem;color:var(--mu);margin-top:6px;min-height:1.2em;"></div>
+
+      <div class="sdiv" style="margin-top:12px;">Record Hotkey <span style="color:var(--vi);font-size:.85em;letter-spacing:0;font-family:var(--sa);">— start/stop recording with a key</span></div>
+      <div class="row" style="gap:8px;align-items:center;margin-bottom:7px;">
+        <div style="flex:1;">
+          <div class="tgrid-lbl">Record Toggle Key</div>
+          <select id="mac-rec-key" style="width:100%;">
+            <option value="">Disabled (use button only)</option>
+            <optgroup label="Function Keys">
+              <option>F1</option><option>F2</option><option>F3</option><option>F4</option>
+              <option>F5</option><option>F6</option><option>F7</option><option>F8</option>
+              <option>F9</option><option>F10</option><option>F11</option><option>F12</option>
+            </optgroup>
+            <optgroup label="Navigation">
+              <option>INS</option><option>DEL</option><option>HOME</option><option>END</option>
+              <option>PGUP</option><option>PGDN</option>
+            </optgroup>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="gap:8px;align-items:flex-end;margin-bottom:7px;">
+        <div style="flex:1;">
+          <div class="tgrid-lbl">Trigger Hotkey (saved with macro)</div>
+          <select id="mac-rec-trigger-key" style="width:100%;">
+            <option value="">No hotkey</option>
+            <optgroup label="Function Keys">
+              <option>F1</option><option>F2</option><option>F3</option><option>F4</option>
+              <option>F5</option><option>F6</option><option>F7</option><option>F8</option>
+              <option>F9</option><option>F10</option><option>F11</option><option>F12</option>
+            </optgroup>
+            <optgroup label="Navigation">
+              <option>INS</option><option>DEL</option><option>HOME</option><option>END</option>
+              <option>PGUP</option><option>PGDN</option>
+            </optgroup>
+          </select>
+        </div>
+        <div style="display:flex;align-items:flex-end;padding-bottom:2px;">
+          <label style="font-size:.72rem;color:var(--tx);display:flex;align-items:center;gap:5px;cursor:pointer;">
+            <input type="checkbox" id="mac-rec-loop"> Loop
+          </label>
+        </div>
+        <button class="btn btn-g" id="mac-rec-key-save" style="flex:0 0 auto;padding:8px 14px;">Set</button>
+      </div>
+      <div id="mac-rec-key-status" style="font-family:var(--mo);font-size:.6rem;color:var(--mu);margin-top:3px;min-height:1em;"></div>
+      <div class="hint" style="margin-top:4px;">Press the toggle key anywhere to start/stop recording. Saved automatically — rename afterward if needed.</div>
+
+      <div class="sdiv" style="margin-top:14px;">Saved Macros</div>
+      <div id="mac-list" style="min-height:30px;"></div>
+    </div>
+
+    <!-- Delay Editor modal -->
+    <div id="delay-editor" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:999;display:none;align-items:center;justify-content:center;">
+      <div style="background:var(--bg2);border:1px solid var(--bd2);border-radius:10px;padding:18px;width:340px;max-height:80vh;overflow-y:auto;">
+        <div style="font-size:.8rem;font-weight:600;color:var(--tx);margin-bottom:12px;">Edit Delays — <span id="delay-macro-name" style="color:var(--ac);"></span></div>
+        <div class="hint" style="margin-bottom:10px;">Add or adjust delay (ms) between steps. You can insert explicit pauses anywhere.</div>
+        <div id="delay-step-list" style="font-family:var(--mo);font-size:.68rem;max-height:340px;overflow-y:auto;"></div>
+        <div style="margin-top:12px;display:flex;gap:8px;">
+          <button class="btn btn-g" id="delay-add-btn" style="flex:1;">+ Add Delay at End</button>
+          <input type="number" id="delay-add-ms" value="500" min="1" max="60000" style="width:80px;font-size:.72rem;">
+          <span style="align-self:center;font-size:.68rem;color:var(--mu);">ms</span>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;">
+          <button class="btn btn-g" id="delay-save-btn" style="flex:1;">💾 Save Changes</button>
+          <button class="btn btn-d" id="delay-close-btn" style="flex:1;">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ TOOLS ════════════════════════════════════════════════════════════ -->
+  <div id="tab-tools" class="tc">
+
+    <!-- Sensitivity Scaling -->
+    <!-- Export / Import -->
+    <div class="card">
+      <div class="clabel">Backup &amp; Restore</div>
+      <div class="hint" style="margin-bottom:10px;">Export all profiles + macros as a ZIP. Import to restore or share configs.</div>
+      <div class="io-row">
+        <a href="/export" download="rvn_backup.zip" class="btn btn-s" style="flex:1;text-align:center;text-decoration:none;display:inline-block;padding:8px 13px;">⬇ Export ZIP</a>
+        <label class="btn btn-or" style="flex:1;text-align:center;cursor:pointer;">
+          ⬆ Import ZIP
+          <input type="file" id="import-file" accept=".zip" style="display:none;">
+        </label>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:.72rem;color:var(--tx);margin-top:8px;cursor:pointer;">
+        <input type="checkbox" id="import-merge" checked> Merge (keep existing configs, only overwrite duplicates)
+      </label>
+      <div id="import-status" style="font-family:var(--mo);font-size:.62rem;color:var(--mu);margin-top:7px;min-height:1.2em;"></div>
+    </div>
+
+  </div>
+
+  <!-- ═══ HUMANIZE ══════════════════════════════════════════════════════════ -->
+  <div id="tab-humanize" class="tc">
+    <div class="card">
+      <div class="clabel">Humanization</div>
+      <div class="hrow">
+        <span class="hlbl">Jitter</span>
+        <input type="range" id="js" min="0" max="1" step="0.01" value="0.15" style="flex:1">
+        <span class="hval" id="jv">0.15</span>
+      </div>
+      <div class="hint" style="margin-bottom:13px">Gaussian noise per tick · 0 = off · 1 = max</div>
+      <div class="hrow">
+        <span class="hlbl">Smooth</span>
+        <input type="range" id="ss" min="0" max="0.94" step="0.01" value="0.60" style="flex:1">
+        <span class="hval" id="sv2">0.60</span>
+      </div>
+      <div class="hint">Exponential smoothing · 0 = raw · 0.94 = very smooth</div>
+    </div>
+  </div>
+
+  <!-- ═══ SETTINGS ═══════════════════════════════════════════════════════════ -->
+  <div id="tab-settings" class="tc">
+
+    <div class="card">
+      <div class="clabel">Trigger Mode</div>
+      <select id="trig">
+        <option value="LMB">LMB only</option>
+        <option value="LMB+RMB">LMB + RMB together (ADS + fire)</option>
+      </select>
+    </div>
+
+    <div class="card">
+      <div class="clabel">Controller <span id="conn-dot2" class="conn-dot" style="margin-left:4px"></span></div>
+      <select id="ctrl">
+        <option value="makcu">MAKCU (2-PC Hardware)</option>
+        <option value="kmbox">KMBox Net / Pro (2-PC Hardware)</option>
+        <option value="software">No Hardware — Software Direct (1-PC)</option>
+      </select>
+      <div id="cbw" style="margin-top:7px;"></div>
+    </div>
+
+    <div class="card" id="kmbox-card" style="display:none">
+      <div class="clabel">KMBox Net — UDP</div>
+      <label style="font-size:.64rem;color:var(--mu);display:block;margin-bottom:5px;text-transform:uppercase;">IP Address</label>
+      <input type="text" id="km-ip" placeholder="192.168.2.188" style="margin-bottom:8px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:9px;">
+        <div>
+          <label style="font-size:.64rem;color:var(--mu);display:block;margin-bottom:4px;text-transform:uppercase;">Port</label>
+          <input type="text" id="km-port" placeholder="57856">
+        </div>
+        <div>
+          <label style="font-size:.64rem;color:var(--rd);display:block;margin-bottom:4px;text-transform:uppercase;">UUID ★ required</label>
+          <input type="text" id="km-uuid" placeholder="3AC07019" style="border-color:#3a1820;">
+        </div>
+      </div>
+      <div class="row">
+        <button class="btn btn-s" id="km-save" style="flex:1">Save</button>
+        <button class="btn btn-g" id="km-conn" style="flex:1">Connect</button>
+      </div>
+      <div id="km-msg" style="margin-top:7px;font-size:.7rem;color:var(--mu);min-height:1.2em;font-family:var(--mo)"></div>
+      <div class="hint" style="margin-top:8px;line-height:1.9">
+        Find UUID in <strong>KMBox Client → Device Info</strong><br>
+        Port: check the KMBox device screen<br>
+        No extra libraries — raw UDP only
+      </div>
+    </div>
+
+    <div class="card" id="sw-card" style="display:none">
+      <div class="clabel">Software Direct Mode</div>
+      <div class="sw-notice">
+        SendInput Windows API<br>Runs on a <strong>single PC</strong> with no external hardware
+        <span class="w-line">⚠ Python must run on Windows only<br>⚠ May be detected by anti-cheat</span>
+      </div>
+      <div id="sw-status" style="margin-top:8px;font-size:.68rem;font-family:var(--mo);color:var(--mu);">—</div>
+    </div>
+
+    <div class="card">
+      <div class="clabel">
+        Profile
+        <span id="cfg-badge" style="background:#031410;border:1px solid #093820;color:var(--ac2);padding:2px 8px;border-radius:8px;font-size:.84em;letter-spacing:0;font-family:var(--mo);"></span>
+      </div>
+      <div class="cfrow"><select id="cfgfd"></select></div>
+      <div class="row" style="margin-top:8px;">
+        <input type="text" id="new-cfg-name" placeholder="New profile name…" style="flex:1;">
+        <button class="btn btn-s" id="create-cfg">New</button>
+        <button class="btn btn-d" id="delete-cfg">Del</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="clabel" id="browse-lbl">Browse Configs</div>
+      <input type="text" id="search" placeholder="Search name or tag…" style="margin-bottom:8px;">
+      <div id="tag-filters" class="tfilters"></div>
+      <select id="cfgdd" size="6" style="font-family:var(--mo);font-size:.74rem;"></select>
+    </div>
+
+    <div class="card">
+      <div class="clabel">Save Config</div>
+      <div class="warn" id="warn"><span>!</span><span id="warn-txt">error</span></div>
+
+      <div style="margin-bottom:10px;">
+        <label style="font-size:.62rem;color:var(--mu);display:block;margin-bottom:5px;letter-spacing:.5px;text-transform:uppercase;font-family:var(--mo);">Name</label>
+        <input type="text" id="cfg-name" placeholder="e.g. AK47 · MP5 Comp · M249 Iron">
+      </div>
+
+      <div class="sdiv">Tags — Quick Presets</div>
+
+      <div class="preset-section">
+        <div class="preset-lbl" style="color:#6aadff;">Game</div>
+        <div class="preset-row" id="preset-game">
+          <button class="pbtn game" data-k="game" data-v="R6">R6</button>
+          <button class="pbtn game" data-k="game" data-v="Rust">Rust</button>
+          <button class="pbtn game" data-k="game" data-v="CS2">CS2</button>
+          <button class="pbtn game" data-k="game" data-v="Valorant">Valorant</button>
+          <button class="pbtn game" data-k="game" data-v="Apex">Apex</button>
+        </div>
+      </div>
+      <div class="preset-section">
+        <div class="preset-lbl" style="color:#88cc44;">Barrel / Attach</div>
+        <div class="preset-row" id="preset-attach">
+          <button class="pbtn attach" data-k="barrel" data-v="Comp">Comp</button>
+          <button class="pbtn attach" data-k="barrel" data-v="Muzzle">Muzzle</button>
+          <button class="pbtn attach" data-k="barrel" data-v="Flash">Flash</button>
+          <button class="pbtn attach" data-k="barrel" data-v="Ext">Ext</button>
+          <button class="pbtn attach" data-k="barrel" data-v="Silencer">Silencer</button>
+          <button class="pbtn attach" data-k="barrel" data-v="None">None</button>
+        </div>
+      </div>
+      <div class="preset-section">
+        <div class="preset-lbl" style="color:#b080ff;">Scope</div>
+        <div class="preset-row" id="preset-scope">
+          <button class="pbtn scope" data-k="scope" data-v="Iron">Iron</button>
+          <button class="pbtn scope" data-k="scope" data-v="Holo">Holo</button>
+          <button class="pbtn scope" data-k="scope" data-v="ACOG">ACOG</button>
+          <button class="pbtn scope" data-k="scope" data-v="2x">2x</button>
+          <button class="pbtn scope" data-k="scope" data-v="3x">3x</button>
+          <button class="pbtn scope" data-k="scope" data-v="4x">4x</button>
+        </div>
+      </div>
+      <div class="preset-section" style="margin-bottom:12px;">
+        <div class="preset-lbl" style="color:#ddaa44;">Grip</div>
+        <div class="preset-row" id="preset-grip">
+          <button class="pbtn grip" data-k="grip" data-v="Vertical">Vertical</button>
+          <button class="pbtn grip" data-k="grip" data-v="Angled">Angled</button>
+          <button class="pbtn grip" data-k="grip" data-v="Half">Half</button>
+          <button class="pbtn grip" data-k="grip" data-v="None">None</button>
+        </div>
+      </div>
+
+      <div class="sdiv">Custom Tags</div>
+      <div id="tag-chips" class="tag-row"></div>
+      <div class="add-tag-row">
+        <input type="text" id="tag-key" placeholder="key" style="flex:0 0 88px;">
+        <input type="text" id="tag-val" placeholder="value">
+        <button class="btn" id="add-tag-btn" style="flex:0 0 auto;padding:7px 10px;font-size:.67rem;">+ Tag</button>
+      </div>
+
+      <div class="sp-preview" id="sp-preview">Enter a name first…</div>
+      <div class="sp-actions">
+        <button class="btn btn-s" id="save-btn">Save</button>
+        <button class="btn" id="overwrite-btn" style="background:#050c14;border-color:#10283a;color:#5599cc;">Overwrite</button>
+        <button class="btn btn-d" id="delete-btn">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
