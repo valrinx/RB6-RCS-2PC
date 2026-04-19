@@ -55,7 +55,7 @@ jobs:
 
       - name: Build (onefile)
         run: |
-          .\build_nuitka.bat
+          .\scripts\build_nuitka.bat
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
