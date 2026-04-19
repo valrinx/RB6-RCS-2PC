@@ -1918,6 +1918,12 @@ class MacroRecorder:
             if not self._recording: return
             self._steps.append({"type": "kup", "key": key, "dt_ms": self._dt_ms()})
 
+    # Compatibility helpers (used by older tests/callers)
+    def record_move(self, dx: int, dy: int):
+        with self._lock:
+            if not self._recording: return
+            self._steps.append({"type": "move", "dx": int(dx), "dy": int(dy), "dt_ms": self._dt_ms()})
+
     def stop_recording(self) -> list:
         with self._lock:
             self._recording = False
@@ -2453,7 +2459,8 @@ if __name__ == "__main__":
                 self.assertEqual(steps[0]["dx"], 5)
                 self.assertEqual(steps[1]["dy"], 2)
 
-        print("\n══ RVN v8.2 Unit Tests ══")
+        # Windows console codepages (e.g. cp874) may not support box-drawing chars.
+        print("\n== RVN v8.2 Unit Tests ==")
         loader = unittest.TestLoader()
         suite  = unittest.TestSuite()
         for cls in [TestAppState, TestKMBoxPacket, TestWeaponSlotManager,
