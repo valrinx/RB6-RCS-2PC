@@ -442,8 +442,18 @@ def _migrate_exe_configs_once():
     """If appdata configs/ is empty but exe-side configs/ has JSON, copy once."""
     if not _is_packaged_runtime():
         return
-    legacy_dir = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "configs")
-    if not os.path.isdir(legacy_dir):
+    # In onefile builds resources may be extracted to sys._MEIPASS (PyInstaller-style)
+    # or live next to the executable. Try both.
+    legacy_candidates = []
+    try:
+        legacy_candidates.append(os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "configs"))
+    except Exception:
+        pass
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        legacy_candidates.append(os.path.join(os.path.abspath(meipass), "configs"))
+    legacy_dir = next((d for d in legacy_candidates if d and os.path.isdir(d)), None)
+    if not legacy_dir:
         return
     try:
         if any(f.endswith(".json") for f in os.listdir(CONFIG_DIR)):
