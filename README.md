@@ -158,7 +158,7 @@ Both devices must be on the same network (same Wi-Fi or LAN). Use the Network IP
 
 ## Build (Nuitka)
 
-This repo includes `build_nuitka.bat` to produce `dist\RVN.exe`.
+This repo includes `scripts/build_nuitka.bat` to produce `dist\RVN.exe`.
 
 One-time setup:
 
@@ -170,7 +170,7 @@ pip install -r requirements-dev.txt
 Build:
 
 ```bat
-build_nuitka.bat
+scripts\build_nuitka.bat
 ```
 
 ## Releases (GitHub)
@@ -199,5 +199,4 @@ If a packaged build can’t find `static/` or `templates/`:
 
 ## Contributors
 
-- secretlay3r — code cleanup
-- blainsage — firewall tip (port 8000)
+See `docs/CONTRIBUTORS.md`.
